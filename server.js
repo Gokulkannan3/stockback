@@ -22,7 +22,8 @@ const pool = new Pool({
 
 app.use('/api', require('./Router/Inventory.router'));
 app.use('/api', require('./Router/Godown.router'));
-app.use('/api', require('./Router/Admin.router')); // Add User router
+app.use('/api', require('./Router/Admin.router'));
+app.use('/api', require('./Router/Analysis.router'));
 // app.use('/api/locations', require('./Router/Location.router'));
 // app.use('/api/directcust', require('./Router/Directcust.router'));
 // app.use('/api/direct', require('./Router/Direct.router'));
