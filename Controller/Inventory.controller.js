@@ -9,13 +9,12 @@ const pool = new Pool({
   database: process.env.PGDATABASE,
 });
 
+/* ──────────────────────  PRODUCT  ────────────────────── */
 exports.addProduct = async (req, res) => {
   try {
     const { productname, price, case_count, per_case, brand, product_type } = req.body;
-
-    if (!productname || !price || !case_count || !per_case || !brand || !product_type) {
+    if (!productname || !price || !case_count || !per_case || !brand || !product_type)
       return res.status(400).json({ message: 'All required fields must be provided' });
-    }
 
     const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
 
@@ -25,11 +24,7 @@ exports.addProduct = async (req, res) => {
     );
 
     if (typeCheck.rows.length === 0) {
-      await pool.query(
-        'INSERT INTO public.products (product_type) VALUES ($1)',
-        [product_type]
-      );
-
+      await pool.query('INSERT INTO public.products (product_type) VALUES ($1)', [product_type]);
       await pool.query(`
         CREATE TABLE IF NOT EXISTS public.${tableName} (
           id BIGSERIAL PRIMARY KEY,
@@ -42,31 +37,18 @@ exports.addProduct = async (req, res) => {
       `);
     }
 
-    const duplicateCheck = await pool.query(
+    const dup = await pool.query(
       `SELECT id FROM public.${tableName} WHERE productname = $1 AND brand = $2`,
       [productname, brand]
     );
+    if (dup.rows.length) return res.status(400).json({ message: 'Product already exists for this brand' });
 
-    if (duplicateCheck.rows.length > 0) {
-      return res.status(400).json({ message: 'Product already exists for this brand' });
-    }
+    const result = await pool.query(
+      `INSERT INTO public.${tableName} (productname, price, case_count, per_case, brand)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [productname, parseFloat(price), parseInt(case_count, 10), parseInt(per_case, 10), brand]
+    );
 
-    const insertQuery = `
-      INSERT INTO public.${tableName}
-      (productname, price, case_count, per_case, brand)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id
-    `;
-
-    const values = [
-      productname,
-      parseFloat(price),
-      parseInt(case_count, 10),
-      parseInt(per_case, 10),
-      brand
-    ];
-
-    const result = await pool.query(insertQuery, values);
     res.status(201).json({ message: 'Product saved successfully', id: result.rows[0].id });
   } catch (err) {
     console.error(err);
@@ -78,31 +60,18 @@ exports.updateProduct = async (req, res) => {
   try {
     const { tableName, id } = req.params;
     const { productname, price, case_count, per_case, brand } = req.body;
-
-    if (!productname || !price || !case_count || !per_case || !brand) {
+    if (!productname || !price || !case_count || !per_case || !brand)
       return res.status(400).json({ message: 'All required fields must be provided' });
-    }
 
-    const query = `
-      UPDATE public.${tableName}
-      SET productname = $1, price = $2, case_count = $3, per_case = $4, brand = $5
-      WHERE id = $6 RETURNING id
-    `;
-    const values = [
-      productname,
-      parseFloat(price),
-      parseInt(case_count, 10),
-      parseInt(per_case, 10),
-      brand,
-      id
-    ];
+    const result = await pool.query(
+      `UPDATE public.${tableName}
+       SET productname=$1, price=$2, case_count=$3, per_case=$4, brand=$5
+       WHERE id=$6 RETURNING id`,
+      [productname, parseFloat(price), parseInt(case_count, 10), parseInt(per_case, 10), brand, id]
+    );
 
-    const result = await pool.query(query, values);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-
-    res.status(200).json({ message: 'Product updated successfully' });
+    if (!result.rows.length) return res.status(404).json({ message: 'Product not found' });
+    res.json({ message: 'Product updated successfully' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to update product' });
@@ -111,31 +80,15 @@ exports.updateProduct = async (req, res) => {
 
 exports.getProducts = async (req, res) => {
   try {
-    const typeResult = await pool.query('SELECT product_type FROM public.products');
-    const productTypes = typeResult.rows.map(row => row.product_type);
+    const types = await pool.query('SELECT product_type FROM public.products');
+    const all = [];
 
-    let allProducts = [];
-
-    for (const productType of productTypes) {
-      const tableName = productType.toLowerCase().replace(/\s+/g, '_');
-      const query = `
-        SELECT id, productname, price, case_count, per_case, brand
-        FROM public.${tableName}
-      `;
-      const result = await pool.query(query);
-      const products = result.rows.map(row => ({
-        id: row.id,
-        product_type: productType,
-        productname: row.productname,
-        price: row.price,
-        case_count: row.case_count,
-        per_case: row.per_case,
-        brand: row.brand
-      }));
-      allProducts = [...allProducts, ...products];
+    for (const { product_type } of types.rows) {
+      const tbl = product_type.toLowerCase().replace(/\s+/g, '_');
+      const rows = await pool.query(`SELECT id, productname, price, case_count, per_case, brand FROM public.${tbl}`);
+      all.push(...rows.rows.map(r => ({ ...r, product_type })));
     }
-
-    res.status(200).json(allProducts);
+    res.json(all);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to fetch products' });
@@ -145,47 +98,40 @@ exports.getProducts = async (req, res) => {
 exports.getProductsByType = async (req, res) => {
   try {
     const { productType } = req.params;
-    const tableName = productType.toLowerCase().replace(/\s+/g, '_');
-    const query = `
-      SELECT id, productname, price, case_count, per_case, brand
-      FROM public.${tableName}
-      ORDER BY productname
-    `;
-    const result = await pool.query(query);
-    res.status(200).json(result.rows);
+    const tbl = productType.toLowerCase().replace(/\s+/g, '_');
+    const rows = await pool.query(`SELECT id, productname, price, case_count, per_case, brand FROM public.${tbl} ORDER BY productname`);
+    res.json(rows.rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to fetch products for type' });
   }
 };
 
+exports.deleteProduct = async (req, res) => {
+  try {
+    const { tableName, id } = req.params;
+    const result = await pool.query(`DELETE FROM public.${tableName} WHERE id=$1 RETURNING id`, [id]);
+    if (!result.rows.length) return res.status(404).json({ message: 'Product not found' });
+    res.json({ message: 'Product deleted successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to delete product' });
+  }
+};
+
+/* ──────────────────────  PRODUCT TYPE  ────────────────────── */
 exports.addProductType = async (req, res) => {
   try {
     const { product_type } = req.body;
+    if (!product_type) return res.status(400).json({ message: 'Product type is required' });
 
-    if (!product_type) {
-      return res.status(400).json({ message: 'Product type is required' });
-    }
+    const fmt = product_type.toLowerCase().replace(/\s+/g, '_');
+    const exists = await pool.query('SELECT 1 FROM public.products WHERE product_type=$1', [fmt]);
+    if (exists.rows.length) return res.status(400).json({ message: 'Product type already exists' });
 
-    const formattedProductType = product_type.toLowerCase().replace(/\s+/g, '_');
-
-    const typeCheck = await pool.query(
-      'SELECT product_type FROM public.products WHERE product_type = $1',
-      [formattedProductType]
-    );
-
-    if (typeCheck.rows.length > 0) {
-      return res.status(400).json({ message: 'Product type already exists' });
-    }
-
-    await pool.query(
-      'INSERT INTO public.products (product_type) VALUES ($1)',
-      [formattedProductType]
-    );
-
-    const tableName = formattedProductType;
+    await pool.query('INSERT INTO public.products (product_type) VALUES ($1)', [fmt]);
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS public.${tableName} (
+      CREATE TABLE IF NOT EXISTS public.${fmt} (
         id BIGSERIAL PRIMARY KEY,
         productname TEXT NOT NULL,
         price NUMERIC(10,2) NOT NULL,
@@ -194,7 +140,6 @@ exports.addProductType = async (req, res) => {
         brand TEXT NOT NULL
       )
     `);
-
     res.status(201).json({ message: 'Product type created successfully' });
   } catch (err) {
     console.error(err);
@@ -204,46 +149,40 @@ exports.addProductType = async (req, res) => {
 
 exports.getProductTypes = async (req, res) => {
   try {
-    const result = await pool.query('SELECT product_type FROM public.products');
-    res.status(200).json(result.rows);
+    const result = await pool.query('SELECT product_type FROM public.products ORDER BY product_type');
+    res.json(result.rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to fetch product types' });
   }
 };
 
+/* ──────────────────────  BRAND (with agent_name)  ────────────────────── */
 exports.addBrand = async (req, res) => {
   try {
-    const { brand } = req.body;
+    const { brand, agent_name } = req.body;
+    if (!brand) return res.status(400).json({ message: 'Brand name is required' });
 
-    if (!brand) {
-      return res.status(400).json({ message: 'Brand is required' });
-    }
+    const fmt = brand.toLowerCase().replace(/\s+/g, '_');
 
-    const formattedBrand = brand.toLowerCase().replace(/\s+/g, '_');
-
+    // Ensure table + column
     await pool.query(`
       CREATE TABLE IF NOT EXISTS public.brand (
         id BIGSERIAL PRIMARY KEY,
-        name VARCHAR NOT NULL UNIQUE
+        name VARCHAR NOT NULL UNIQUE,
+        agent_name TEXT
       )
     `);
 
-    const brandCheck = await pool.query(
-      'SELECT name FROM public.brand WHERE name = $1',
-      [formattedBrand]
+    const dup = await pool.query('SELECT id FROM public.brand WHERE name=$1', [fmt]);
+    if (dup.rows.length) return res.status(400).json({ message: 'Brand already exists' });
+
+    const ins = await pool.query(
+      'INSERT INTO public.brand (name, agent_name) VALUES ($1,$2) RETURNING id, name, agent_name',
+      [fmt, agent_name || null]
     );
 
-    if (brandCheck.rows.length > 0) {
-      return res.status(400).json({ message: 'Brand already exists' });
-    }
-
-    await pool.query(
-      'INSERT INTO public.brand (name) VALUES ($1)',
-      [formattedBrand]
-    );
-
-    res.status(201).json({ message: 'Brand created successfully' });
+    res.status(201).json({ message: 'Brand created successfully', brand: ins.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to create brand' });
@@ -252,25 +191,51 @@ exports.addBrand = async (req, res) => {
 
 exports.getBrands = async (req, res) => {
   try {
-    const result = await pool.query('SELECT name FROM public.brand');
-    res.status(200).json(result.rows);
+    const result = await pool.query('SELECT id, name, agent_name FROM public.brand ORDER BY name');
+    res.json(result.rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to fetch brands' });
   }
 };
 
-exports.deleteProduct = async (req, res) => {
+exports.updateBrand = async (req, res) => {
   try {
-    const { tableName, id } = req.params;
-    const query = `DELETE FROM public.${tableName} WHERE id = $1 RETURNING id`;
-    const result = await pool.query(query, [id]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-    res.status(200).json({ message: 'Product deleted successfully' });
+    const { id } = req.params;
+    const { brand, agent_name } = req.body;
+    if (!brand) return res.status(400).json({ message: 'Brand name is required' });
+
+    const fmt = brand.toLowerCase().replace(/\s+/g, '_');
+
+    // Prevent name conflict with other brands
+    const conflict = await pool.query(
+      'SELECT id FROM public.brand WHERE name=$1 AND id!=$2',
+      [fmt, id]
+    );
+    if (conflict.rows.length) return res.status(400).json({ message: 'Brand name already taken' });
+
+    const upd = await pool.query(
+      'UPDATE public.brand SET name=$1, agent_name=$2 WHERE id=$3 RETURNING id, name, agent_name',
+      [fmt, agent_name || null, id]
+    );
+
+    if (!upd.rows.length) return res.status(404).json({ message: 'Brand not found' });
+
+    res.json({ message: 'Brand updated successfully', brand: upd.rows[0] });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Failed to delete product' });
+    res.status(500).json({ message: 'Failed to update brand' });
+  }
+};
+
+exports.deleteBrand = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const del = await pool.query('DELETE FROM public.brand WHERE id=$1 RETURNING id', [id]);
+    if (!del.rows.length) return res.status(404).json({ message: 'Brand not found' });
+    res.json({ message: 'Brand deleted successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to delete brand' });
   }
 };

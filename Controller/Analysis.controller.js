@@ -13,36 +13,40 @@ const pool = new Pool({
 exports.getStockAnalysis = async (req, res) => {
   const client = await pool.connect();
   try {
-    // 1. All individual rows
+    // ────────────────────── 1. All individual rows ──────────────────────
     const allRes = await client.query(`
       SELECT 
         COALESCE(g.name, 'Unknown') AS godown_name,
         COALESCE(s.product_type, 'Unknown') AS product_type,
         s.productname,
         COALESCE(s.brand, 'Unknown') AS brand,
+        COALESCE(b.agent_name, '-') AS agent_name,
         s.current_cases AS cases,
         s.per_case,
         (s.current_cases * s.per_case) AS total_qty
       FROM public.stock s
       JOIN public.godown g ON s.godown_id = g.id
+      LEFT JOIN public.brand b ON s.brand = b.name
       ORDER BY g.name, s.product_type, s.productname
     `);
 
-    // 2. Low stock (< 3 cases total)
+    // ────────────────────── 2. Low stock (< 3 cases total) ──────────────────────
     const lowRes = await client.query(`
       SELECT 
-        product_type,
-        productname,
-        brand,
-        SUM(current_cases) AS total_cases,
-        SUM(current_cases * per_case) AS total_qty
-      FROM public.stock
-      GROUP BY product_type, productname, brand
-      HAVING SUM(current_cases) < 3
+        s.product_type,
+        s.productname,
+        s.brand,
+        COALESCE(b.agent_name, '-') AS agent_name,
+        SUM(s.current_cases) AS total_cases,
+        SUM(s.current_cases * s.per_case) AS total_qty
+      FROM public.stock s
+      LEFT JOIN public.brand b ON s.brand = b.name
+      GROUP BY s.product_type, s.productname, s.brand, b.agent_name
+      HAVING SUM(s.current_cases) < 3
       ORDER BY total_cases ASC
     `);
 
-    // 3. Godown-wise total cases
+    // ────────────────────── 3. Godown-wise total cases ──────────────────────
     const godownRes = await client.query(`
       SELECT 
         g.name AS godown_name,
@@ -53,26 +57,28 @@ exports.getStockAnalysis = async (req, res) => {
       ORDER BY total_cases DESC
     `);
 
-    // 4. Product-wise total cases (all godowns)
+    // ────────────────────── 4. Product-wise total cases (all godowns) ──────────────────────
     const productRes = await client.query(`
       SELECT 
-        product_type,
-        productname,
-        brand,
-        SUM(current_cases) AS total_cases,
-        SUM(current_cases * per_case) AS total_qty
-      FROM public.stock
-      GROUP BY product_type, productname, brand
+        s.product_type,
+        s.productname,
+        s.brand,
+        COALESCE(b.agent_name, '-') AS agent_name,
+        SUM(s.current_cases) AS total_cases,
+        SUM(s.current_cases * s.per_case) AS total_qty
+      FROM public.stock s
+      LEFT JOIN public.brand b ON s.brand = b.name
+      GROUP BY s.product_type, s.productname, s.brand, b.agent_name
       ORDER BY total_cases DESC
     `);
 
-    // 5. Grand total
+    // ────────────────────── 5. Grand total ──────────────────────
     const grandRes = await client.query(`
       SELECT 
-        COUNT(DISTINCT product_type || productname || brand) AS unique_products,
-        SUM(current_cases) AS total_cases,
-        SUM(current_cases * per_case) AS total_quantity
-      FROM public.stock
+        COUNT(DISTINCT s.product_type || s.productname || s.brand) AS unique_products,
+        SUM(s.current_cases) AS total_cases,
+        SUM(s.current_cases * s.per_case) AS total_quantity
+      FROM public.stock s
     `);
 
     res.json({
