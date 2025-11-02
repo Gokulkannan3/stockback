@@ -165,33 +165,61 @@ exports.addStockToGodown = async (req, res) => {
     res.status(500).json({ message: 'Failed to add stock' });
   }
 };
+// controllers/Godown.controller.js (only relevant part)
 exports.getStockByGodown = async (req, res) => {
+  const { godown_id } = req.params;
+
   try {
-    const { godown_id } = req.params;
-    // Validate godown exists
-    const godownCheck = await pool.query('SELECT id FROM public.godown WHERE id = $1', [godown_id]);
-    if (godownCheck.rows.length === 0) {
-      return res.status(404).json({ message: 'Godown not found' });
-    }
-    // Fetch stock + godown name + agent from brand
-    const result = await pool.query(
-      `SELECT
-          s.*,
-          g.name AS godown_name,
-          COALESCE(b.agent_name, '-') AS agent_name
-       FROM public.stock s
-       JOIN public.godown g ON s.godown_id = g.id
-       LEFT JOIN public.brand b ON s.brand = b.name
-       WHERE s.godown_id = $1
-       ORDER BY s.productname`,
-      [godown_id]
-    );
-    res.status(200).json(result.rows);
+    const typesRes = await pool.query(`
+      SELECT DISTINCT product_type
+      FROM public.stock 
+      WHERE godown_id = $1 AND current_cases > 0
+    `, [godown_id]);
+
+    if (typesRes.rows.length === 0) return res.json([]);
+
+    const productTypes = typesRes.rows.map(r => r.product_type);
+    let joins = '';
+    const params = [godown_id];
+    let idx = 2;
+
+    productTypes.forEach(type => {
+      const table = type.toLowerCase().replace(/\s+/g, '_');
+      joins += `
+        LEFT JOIN public."${table}" p${idx}
+          ON LOWER(s.productname) = LOWER(p${idx}.productname)
+          AND LOWER(s.brand) = LOWER(p${idx}.brand)
+      `;
+      idx++;
+    });
+
+    const finalQuery = `
+      SELECT 
+        s.id,
+        s.product_type,
+        s.productname,
+        s.brand,
+        s.per_case,
+        s.current_cases,
+        COALESCE(
+          ${productTypes.map((_, i) => `CAST(p${i + 2}.price AS NUMERIC)`).join(', ')}, 
+          0
+        )::NUMERIC AS rate_per_box
+      FROM public.stock s
+      ${joins}
+      WHERE s.godown_id = $1 AND s.current_cases > 0
+      ORDER BY s.product_type, s.productname
+    `;
+
+    const result = await pool.query(finalQuery, params);
+    res.json(result.rows);
+
   } catch (err) {
-    console.error('Error in getStockByGodown:', err.message);
+    console.error('getStockByGodown:', err.message);
     res.status(500).json({ message: 'Failed to fetch stock' });
   }
 };
+
 exports.takeStockFromGodown = async (req, res) => {
   const client = await pool.connect();
   try {
