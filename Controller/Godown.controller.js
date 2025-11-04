@@ -165,7 +165,6 @@ exports.addStockToGodown = async (req, res) => {
     res.status(500).json({ message: 'Failed to add stock' });
   }
 };
-
 exports.getStockByGodown = async (req, res) => {
   const { godown_id } = req.params;
 
@@ -173,7 +172,7 @@ exports.getStockByGodown = async (req, res) => {
     const typesRes = await pool.query(`
       SELECT DISTINCT product_type
       FROM public.stock 
-      WHERE godown_id = $1 AND current_cases > 0
+      WHERE godown_id = $1
     `, [godown_id]);
 
     if (typesRes.rows.length === 0) return res.json([]);
@@ -204,10 +203,14 @@ exports.getStockByGodown = async (req, res) => {
         COALESCE(
           ${productTypes.map((_, i) => `CAST(p${i + 2}.price AS NUMERIC)`).join(', ')}, 
           0
-        )::NUMERIC AS rate_per_box
+        )::NUMERIC AS rate_per_box,
+        g.name AS godown_name,
+        COALESCE(b.agent_name, '-') AS agent_name
       FROM public.stock s
+      JOIN public.godown g ON s.godown_id = g.id
+      LEFT JOIN public.brand b ON s.brand = b.name
       ${joins}
-      WHERE s.godown_id = $1 AND s.current_cases > 0
+      WHERE s.godown_id = $1
       ORDER BY s.product_type, s.productname
     `;
 
