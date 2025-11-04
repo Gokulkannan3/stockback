@@ -174,87 +174,127 @@ const generatePDF = (data, outputPath) => {
     const leftX = 50;
     const rightX = 350;
     const tableStartX = leftX;
-    const tableWidth = 490; // 540 - 50 (right margin)
-    const colWidths = [30, 90, 40, 40, 50, 60, 40, 70, 70]; // Must sum to ~490
+    const tableWidth = 490;
+    
+    // === DYNAMIC COLUMN WIDTHS (Sum = 490) ===
+    const colWidths = [35, 130, 45, 45, 55, 65, 65, 50]; // Optimized for content
+    const rowHeight = 20;
+    const cellPadding = 4;
 
-    // === CUSTOMER INFO & BILL DETAILS (Same Y, Bold Titles) ===
+    // === CUSTOMER INFO & BILL DETAILS ===
     const startY = 100;
-
-    // Left: Customer Info
     doc.font('Helvetica-Bold').fontSize(10);
     doc.text('Customer Information', leftX, startY);
-
     doc.font('Helvetica').fontSize(10);
     doc.text(`Party Name : ${data.customer_name || ''}`, leftX, startY + 15);
     doc.text(`Address    : ${data.address || ''}`, leftX, startY + 30);
-    doc.text(`Agent Name : ${data.agent_name || 'DIRECT'}`, leftX, startY + 45);
+    doc.text(`GSTIN      : ${data.gstin || ''}`, leftX, startY + 45);
 
-    // Right: Bill Details
     doc.font('Helvetica-Bold').fontSize(10);
     doc.text('Bill Details', rightX, startY);
-
     doc.font('Helvetica').fontSize(10);
     doc.text(`Bill NO     : ${data.bill_number}`, rightX, startY + 15);
     doc.text(`Bill DATE   : ${formatDate(data.bill_date)}`, rightX, startY + 30);
-    doc.text(`GSTIN       : ${data.gstin || ''}`, rightX, startY + 45);
+    doc.text(`Agent Name : ${data.agent_name || 'DIRECT'}`, rightX, startY + 45);
     doc.text(`L.R. NUMBER : ${data.lr_number || ''}`, rightX, startY + 60);
+    doc.text(`No. of Cases : ${data.totalCases}`, rightX,startY + 75).fontSize(15);
 
     // === TABLE ===
     let y = startY + 90;
+    const headers = ['S.No', 'Product', 'Case', 'Per', 'Qty', 'Rate', 'Amount', 'From'];
 
-    const headers = ['S.No', 'Product', 'Case', 'Per', 'Qty', 'Rate', 'Disc', 'Amount', 'From'];
+    // Pre-calculate vertical lines
+    const verticalLines = [tableStartX];
+    colWidths.forEach(w => verticalLines.push(verticalLines[verticalLines.length - 1] + w));
+
     let x = tableStartX;
 
-    // Table Header
+    // === HEADER (WITH FULL BLACK BORDERS) ===
+    const headerTop = y;
+    const headerBottom = y + rowHeight;
+
+    // Full black border around header
+    doc.lineWidth(0.8).strokeColor('black');
+    doc.moveTo(tableStartX, headerTop).lineTo(tableStartX + tableWidth, headerTop).stroke();
+    doc.moveTo(tableStartX, headerBottom).lineTo(tableStartX + tableWidth, headerBottom).stroke();
+    verticalLines.forEach(vx => {
+      doc.moveTo(vx, headerTop).lineTo(vx, headerBottom).stroke();
+    });
+
+    // Header text (centered)
     doc.font('Helvetica-Bold').fontSize(9);
     headers.forEach((h, i) => {
-      const align = i === 0 || i >= 2 ? 'center' : 'left';
-      doc.text(h, x, y, { width: colWidths[i], align });
+      doc.text(h, x + cellPadding, y + cellPadding, {
+        width: colWidths[i] - 2 * cellPadding,
+        align: 'center'
+      });
       x += colWidths[i];
     });
 
-    // Header Underline
-    doc.moveTo(tableStartX, y + 12).lineTo(tableStartX + tableWidth, y + 12).stroke();
-    y += 20;
+    y += rowHeight + 1;
 
-    // Table Rows
+    // === ROWS ===
     doc.font('Helvetica').fontSize(9);
-    data.items.forEach(item => {
+    data.items.forEach((item, index) => {
       x = tableStartX;
       const row = [
-        item.s_no,
+        (index + 1).toString(),
         item.productname,
-        item.cases,
-        item.per_case,
-        item.quantity,
-        `${item.rate_per_box.toFixed(2)} Box`,
-        `${item.discount_percent}%`,
+        item.cases.toString(),
+        item.per_case.toString(),
+        (item.cases * item.per_case).toString(),
+        `${item.rate_per_box.toFixed(2)}`,
         item.amount.toFixed(2),
         item.godown
       ];
+
+      const rowTop = y;
+      const rowBottom = y + rowHeight;
+
+      // === FULL BLACK GRID ===
+      doc.lineWidth(0.4).strokeColor('black');
+
+      // Horizontal
+      doc.moveTo(tableStartX, rowTop).lineTo(tableStartX + tableWidth, rowTop).stroke();
+      doc.moveTo(tableStartX, rowBottom).lineTo(tableStartX + tableWidth, rowBottom).stroke();
+
+      // Vertical
+      verticalLines.forEach(vx => {
+        doc.moveTo(vx, rowTop).lineTo(vx, rowBottom).stroke();
+      });
+
+      // === TEXT (CENTERED) ===
+      doc.fillColor('black');
       row.forEach((text, i) => {
-        const align = i === 0 || i >= 2 ? 'center' : 'left';
-        doc.text(text, x, y, { width: colWidths[i], align });
+        const align ='center'; // Product name left-aligned
+        doc.text(text, x + cellPadding, y + cellPadding, {
+          width: colWidths[i] - 2 * cellPadding,
+          align
+        });
         x += colWidths[i];
       });
-      y += 18;
+
+      y += rowHeight + 1;
     });
 
-    // === TRANSPORT & TOTALS (Aligned with Table Width) ===
-    y += 10;
+    // === FINAL BOTTOM BORDER ===
+    doc.lineWidth(0.8)
+       .moveTo(tableStartX, y - 1)
+       .lineTo(tableStartX + tableWidth, y - 1)
+       .strokeColor('black')
+       .stroke();
+
+    // === TRANSPORT & TOTALS ===
+    y += 15;
     const transportStartY = y;
 
-    // Left: Transport Details
     doc.font('Helvetica-Bold').fontSize(10);
     doc.text('Transport Details', leftX, transportStartY);
-
     doc.font('Helvetica').fontSize(10);
-    doc.text(`No. of Cases : ${data.totalCases}`, leftX, transportStartY + 15);
-    doc.text(`From         : ${data.from}`, leftX, transportStartY + 30);
-    doc.text(`To           : ${data.to}`, leftX, transportStartY + 45);
-    doc.text(`Through      : ${data.through}`, leftX, transportStartY + 60);
+    doc.text(`From         : ${data.from}`, leftX, transportStartY + 15);
+    doc.text(`To           : ${data.to}`, leftX, transportStartY + 30);
+    doc.text(`Through      : ${data.through}`, leftX, transportStartY + 45);
 
-    // Right: Totals (Aligned under table, right-justified)
     const totals = [
       ['GOODS VALUE', data.subtotal.toFixed(2)],
       ['SPECIAL DISCOUNT', `-${data.addlDiscountAmt.toFixed(2)}`],
@@ -263,34 +303,34 @@ const generatePDF = (data, outputPath) => {
       ['SUB TOTAL', data.subtotalWithPacking.toFixed(2)],
       ['TAXABLE VALUE', data.taxableUsed.toFixed(2)],
       ['ROUND OFF', data.roundOff.toFixed(2)],
-      ['NET AMOUNT', data.grandTotal.toFixed(2)]
+      [''],
     ];
 
     let ty = transportStartY;
     const labelX = rightX;
-    const valueX = rightX + 100;
-    const valueWidth = 80;
+    const valueX = rightX + 110;
+    const valueWidth = 70;
 
     doc.font('Helvetica').fontSize(10);
-    totals.forEach(([label, value], i) => {
+    totals.forEach(([label, value]) => {
       const lineY = ty + 15;
-      doc.text(label, labelX, lineY);
+      doc.text(label, labelX, lineY, { align: 'left' });
       doc.text(value, valueX, lineY, { width: valueWidth, align: 'right' });
       ty += 15;
     });
 
-    // Optional: Underline NET AMOUNT
+    // Highlight NET AMOUNT
     const netY = ty;
-    doc.font('Helvetica-Bold')
-      .text('NET AMOUNT', labelX, netY)
-      .text(data.grandTotal.toFixed(2), valueX, netY, { width: valueWidth, align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(11)
+       .text('NET AMOUNT', labelX, netY)
+       .text(data.grandTotal.toFixed(2), valueX, netY, { width: valueWidth, align: 'right' });
 
-    // === FOOTER NOTES ===
-    y = Math.max(y, ty) + 30;
+    // === FOOTER ===
+    y = Math.max(y, ty) + 35;
     doc.fontSize(8).font('Helvetica')
-      .text('Note:', leftX, y)
-      .text('1. Company not responsible for transit loss/damage', leftX + 10, y + 12)
-      .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, y + 24);
+       .text('Note:', leftX, y)
+       .text('1. Company not responsible for transit loss/damage', leftX + 10, y + 12)
+       .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, y + 24);
 
     doc.end();
     stream.on('finish', resolve);
@@ -307,5 +347,108 @@ exports.getBookings = async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch bookings' });
+  }
+};
+
+exports.getCustomers = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT ON (customer_name)
+        customer_name, address, gstin, lr_number, agent_name, "from", "to", "through"
+      FROM public.bookings
+      WHERE customer_name IS NOT NULL AND customer_name != ''
+      ORDER BY customer_name, created_at DESC
+    `);
+
+    const customers = result.rows.map(row => ({
+      label: row.customer_name,
+      value: {
+        name: row.customer_name,
+        address: row.address || '',
+        gstin: row.gstin || '',
+        lr_number: row.lr_number || '',
+        agent_name: row.agent_name || '',
+        from: row.from || '',
+        to: row.to || '',
+        through: row.through || ''
+      }
+    }));
+
+    res.json(customers);
+  } catch (err) {
+    console.error('Get Customers Error:', err);
+    res.status(500).json({ message: 'Failed to fetch customers' });
+  }
+};
+
+exports.searchProductsGlobal = async (req, res) => {
+  const { name } = req.query;
+  const searchTerm = `%${name.trim().toLowerCase()}%`;
+
+  try {
+    // Get all godowns
+    const godownsRes = await pool.query(`SELECT id, name FROM public.godown`);
+    const godowns = godownsRes.rows;
+
+    const allResults = [];
+
+    for (const godown of godowns) {
+      const godownId = godown.id;
+
+      // Get product types in this godown
+      const typesRes = await pool.query(`
+        SELECT DISTINCT product_type
+        FROM public.stock 
+        WHERE godown_id = $1 AND current_cases > 0
+          AND (LOWER(productname) LIKE $2 OR LOWER(brand) LIKE $2)
+      `, [godownId, searchTerm]);
+
+      if (typesRes.rows.length === 0) continue;
+
+      const productTypes = typesRes.rows.map(r => r.product_type);
+      let joins = '';
+      const params = [godownId, searchTerm];
+      let idx = 3;
+
+      productTypes.forEach(type => {
+        const table = type.toLowerCase().replace(/\s+/g, '_');
+        joins += `
+          LEFT JOIN public."${table}" p${idx}
+            ON LOWER(s.productname) = LOWER(p${idx}.productname)
+            AND LOWER(s.brand) = LOWER(p${idx}.brand)
+        `;
+        idx++;
+      });
+
+      const finalQuery = `
+        SELECT 
+          s.id,
+          s.product_type,
+          s.productname,
+          s.brand,
+          s.per_case,
+          s.current_cases,
+          COALESCE(
+            ${productTypes.map((_, i) => `CAST(p${i + 3}.price AS NUMERIC)`).join(', ')}, 
+            0
+          )::NUMERIC AS rate_per_box,
+          $1::INTEGER AS godown_id,
+          '${godown.name}' AS godown_name
+        FROM public.stock s
+        ${joins}
+        WHERE s.godown_id = $1 
+          AND s.current_cases > 0
+          AND (LOWER(s.productname) LIKE $2 OR LOWER(s.brand) LIKE $2)
+        ORDER BY s.product_type, s.productname
+      `;
+
+      const result = await pool.query(finalQuery, params);
+      allResults.push(...result.rows);
+    }
+
+    res.json(allResults);
+  } catch (err) {
+    console.error('searchProductsGlobal:', err.message);
+    res.status(500).json({ message: 'Search failed' });
   }
 };

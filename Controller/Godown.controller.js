@@ -165,7 +165,7 @@ exports.addStockToGodown = async (req, res) => {
     res.status(500).json({ message: 'Failed to add stock' });
   }
 };
-// controllers/Godown.controller.js (only relevant part)
+
 exports.getStockByGodown = async (req, res) => {
   const { godown_id } = req.params;
 
