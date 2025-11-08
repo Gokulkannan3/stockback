@@ -452,3 +452,241 @@ exports.searchProductsGlobal = async (req, res) => {
     res.status(500).json({ message: 'Search failed' });
   }
 };
+
+// === EDIT BOOKING (Update items + restock old, deduct new) ===
+exports.editBooking = async (req, res) => {
+  const client = await pool.connect();
+  const { id } = req.params;
+  const {
+    customer_name,
+    address = '',
+    gstin = '',
+    lr_number = '',
+    agent_name = '',
+    from: fromLoc,
+    to: toLoc,
+    through = '',
+    additional_discount = 0,
+    packing_percent = 3.0,
+    taxable_value,
+    stock_from = '',
+    items = []
+  } = req.body;
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Get original booking
+    const origRes = await client.query(
+      'SELECT items, pdf_path FROM public.bookings WHERE id = $1 FOR UPDATE',
+      [id]
+    );
+    if (origRes.rows.length === 0) throw new Error('Booking not found');
+    const original = origRes.rows[0];
+
+    // FIX: items is already an object (from JSON column), NOT a string
+    const oldItems = Array.isArray(original.items) ? original.items : [];
+
+    // 2. Restock old items
+    for (const item of oldItems) {
+      const { id: stock_id, cases } = item;
+      if (!stock_id || !cases) continue;
+
+      await client.query(
+        'UPDATE public.stock SET current_cases = current_cases + $1, taken_cases = taken_cases - $1 WHERE id = $2',
+        [cases, stock_id]
+      );
+      await client.query(
+        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
+        [stock_id, 'added', cases, cases * (item.per_case || 1)]
+      );
+    }
+
+    // 3. Process new items (deduct stock)
+    let subtotal = 0;
+    let totalCases = 0;
+    const processedItems = [];
+
+    for (const [idx, item] of items.entries()) {
+      const {
+        id: stock_id,
+        productname,
+        brand,
+        cases,
+        per_case,
+        discount_percent = 0,
+        godown,
+        rate_per_box
+      } = item;
+
+      if (!stock_id || !cases || !per_case || rate_per_box === undefined) {
+        throw new Error(`Invalid item at index ${idx}`);
+      }
+
+      const stockCheck = await client.query(
+        'SELECT current_cases FROM public.stock WHERE id = $1 FOR UPDATE',
+        [stock_id]
+      );
+      if (stockCheck.rows.length === 0) throw new Error(`Stock not found: ${stock_id}`);
+      if (cases > stockCheck.rows[0].current_cases) {
+        throw new Error(`Not enough stock: ${productname}`);
+      }
+
+      const qty = cases * per_case;
+      const amountBefore = qty * rate_per_box;
+      const discountAmt = amountBefore * (discount_percent / 100);
+      const finalAmt = amountBefore - discountAmt;
+
+      subtotal += finalAmt;
+      totalCases += cases;
+
+      // Deduct stock
+      await client.query(
+        'UPDATE public.stock SET current_cases = current_cases - $1, taken_cases = taken_cases + $1, last_taken_date = CURRENT_TIMESTAMP WHERE id = $2',
+        [cases, stock_id]
+      );
+      await client.query(
+        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
+        [stock_id, 'taken', cases, qty]
+      );
+
+      processedItems.push({
+        s_no: idx + 1,
+        productname: productname || '',
+        brand: brand || '',
+        cases: Number(cases),
+        per_case: Number(per_case),
+        quantity: Number(qty),
+        rate_per_box: parseFloat(rate_per_box),
+        discount_percent: parseFloat(discount_percent),
+        amount: parseFloat(finalAmt.toFixed(2)),
+        godown: godown || stock_from
+      });
+    }
+
+    // 4. Recalculate totals
+    const packingCharges = subtotal * (packing_percent / 100);
+    const subtotalWithPacking = subtotal + packingCharges;
+    const taxableUsed = taxable_value ? parseFloat(taxable_value) : subtotalWithPacking;
+    const addlDiscountAmt = taxableUsed * (additional_discount / 100);
+    const netBeforeRound = taxableUsed - addlDiscountAmt;
+    const grandTotal = Math.round(netBeforeRound);
+    const roundOff = grandTotal - netBeforeRound;
+
+    // 5. Regenerate PDF with unique filename
+    const timestamp = Date.now();
+    const pdfFileName = `bill_${id}_${timestamp}.pdf`;
+    const pdfPath = path.join(__dirname, '..', 'uploads', 'pdfs', pdfFileName);
+
+    await generatePDF({
+      bill_number: original.pdf_path.split('_')[1]?.split('.')[0] || `BILL${id}`,
+      bill_date: new Date().toISOString().split('T')[0],
+      customer_name,
+      address,
+      gstin,
+      lr_number,
+      agent_name,
+      from: fromLoc,
+      to: toLoc,
+      through,
+      items: processedItems,
+      subtotal: parseFloat(subtotal.toFixed(2)),
+      packingCharges: parseFloat(packingCharges.toFixed(2)),
+      subtotalWithPacking: parseFloat(subtotalWithPacking.toFixed(2)),
+      taxableUsed: parseFloat(taxableUsed.toFixed(2)),
+      addlDiscountAmt: parseFloat(addlDiscountAmt.toFixed(2)),
+      roundOff: parseFloat(roundOff.toFixed(2)),
+      grandTotal,
+      totalCases,
+      stock_from: stock_from || 'Unknown',
+      packing_percent
+    }, pdfPath);
+
+    const relativePdfPath = `/uploads/pdfs/${pdfFileName}`;
+
+    // 6. Update booking with safe JSON
+    await client.query(
+      `UPDATE public.bookings SET
+        customer_name = $1, address = $2, gstin = $3, lr_number = $4, agent_name = $5,
+        "from" = $6, "to" = $7, "through" = $8, additional_discount = $9,
+        packing_percent = $10, taxable_value = $11, stock_from = $12,
+        pdf_path = $13, items = $14, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $15`,
+      [
+        customer_name,
+        address,
+        gstin,
+        lr_number,
+        agent_name,
+        fromLoc,
+        toLoc,
+        through,
+        additional_discount,
+        packing_percent,
+        taxable_value ? parseFloat(taxable_value) : null,
+        stock_from,
+        relativePdfPath,
+        JSON.stringify(processedItems), // ← Safe: only numbers/strings
+        id
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Booking updated successfully', pdfPath: relativePdfPath });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Edit Booking Error:', err.message);
+    res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+};
+
+// === DELETE BOOKING (Restock all items) ===
+exports.deleteBooking = async (req, res) => {
+  const client = await pool.connect();
+  const { id } = req.params;
+
+  try {
+    await client.query('BEGIN');
+
+    const bookingRes = await client.query(
+      'SELECT items, pdf_path FROM public.bookings WHERE id = $1 FOR UPDATE',
+      [id]
+    );
+    if (bookingRes.rows.length === 0) throw new Error('Booking not found');
+
+    const { items } = bookingRes.rows[0];
+    const parsedItems = JSON.parse(items);
+
+    // Restock each item
+    for (const item of parsedItems) {
+      const { id: stock_id, cases, per_case } = item;
+      if (!stock_id || !cases) continue;
+
+      await client.query(
+        'UPDATE public.stock SET current_cases = current_cases + $1, taken_cases = taken_cases - $1 WHERE id = $2',
+        [cases, stock_id]
+      );
+      await client.query(
+        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
+        [stock_id, 'added', cases, cases * per_case]
+      );
+    }
+
+    // Delete PDF
+    const pdfPath = path.join(__dirname, '..', bookingRes.rows[0].pdf_path.replace('/uploads/pdfs/', 'uploads/pdfs/'));
+    if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+
+    await client.query('DELETE FROM public.bookings WHERE id = $1', [id]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Booking deleted and stock restored' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Delete Booking Error:', err.message);
+    res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+};

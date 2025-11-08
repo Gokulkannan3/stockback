@@ -394,3 +394,47 @@ exports.exportGodownStockToExcel = async (req, res) => {
     res.status(500).json({ message: 'Failed to export Excel' });
   }
 };
+
+exports.editGodown = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ message: 'Name required' });
+
+    const formatted = name.toLowerCase().trim().replace(/\s+/g, '_');
+    const check = await pool.query('SELECT id FROM public.godown WHERE name = $1 AND id != $2', [formatted, id]);
+    if (check.rows.length > 0) return res.status(400).json({ message: 'Name already exists' });
+
+    const result = await pool.query(
+      'UPDATE public.godown SET name = $1 WHERE id = $2 RETURNING name',
+      [formatted, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ message: 'Godown not found' });
+
+    res.json({ message: 'Updated', name: result.rows[0].name });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to update' });
+  }
+};
+
+// FAST FETCH: Godowns + Stock Count (no full stock details)
+exports.getGodownsFast = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        g.id, 
+        g.name,
+        COALESCE(SUM(s.current_cases), 0) AS total_cases,
+        COUNT(s.id) AS stock_items
+      FROM public.godown g
+      LEFT JOIN public.stock s ON s.godown_id = g.id
+      GROUP BY g.id, g.name
+      ORDER BY g.name
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed' });
+  }
+};
