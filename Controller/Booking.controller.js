@@ -46,7 +46,7 @@ exports.createBooking = async (req, res) => {
 
     const processedItems = [];
 
-    // Process each item → reduce stock + log history
+    // Process each item → reduce stock + log history with customer_name
     for (const [idx, item] of items.entries()) {
       const {
         id: stock_id,
@@ -58,7 +58,7 @@ exports.createBooking = async (req, res) => {
         throw new Error(`Invalid item at index ${idx}: Missing stock_id or data`);
       }
 
-      // === STEP 1: Lock & check stock (like takeStockFromGodown) ===
+      // === STEP 1: Lock & check stock ===
       const stockCheck = await client.query(
         'SELECT current_cases, per_case, taken_cases FROM public.stock WHERE id = $1 FOR UPDATE',
         [stock_id]
@@ -82,7 +82,7 @@ exports.createBooking = async (req, res) => {
       subtotal += finalAmt;
       totalCases += cases;
 
-      // === STEP 3: Update stock (like takeStockFromGodown) ===
+      // === STEP 3: Update stock ===
       const newCases = current_cases - cases;
       const newTakenCases = (taken_cases || 0) + cases;
 
@@ -91,10 +91,12 @@ exports.createBooking = async (req, res) => {
         [newCases, newTakenCases, stock_id]
       );
 
-      // === STEP 4: Log in history ===
+      // === STEP 4: Log in history WITH customer_name ===
       await client.query(
-        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
-        [stock_id, 'taken', cases, cases * per_case]
+        `INSERT INTO public.stock_history 
+         (stock_id, action, cases, per_case_total, date, customer_name) 
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
+        [stock_id, 'taken', cases, cases * per_case, customer_name]
       );
 
       // === STEP 5: Save for PDF ===
@@ -453,7 +455,6 @@ exports.searchProductsGlobal = async (req, res) => {
   }
 };
 
-// === EDIT BOOKING (Update items + restock old, deduct new) ===
 exports.editBooking = async (req, res) => {
   const client = await pool.connect();
   const { id } = req.params;
@@ -484,7 +485,6 @@ exports.editBooking = async (req, res) => {
     if (origRes.rows.length === 0) throw new Error('Booking not found');
     const original = origRes.rows[0];
 
-    // FIX: items is already an object (from JSON column), NOT a string
     const oldItems = Array.isArray(original.items) ? original.items : [];
 
     // 2. Restock old items
@@ -497,8 +497,9 @@ exports.editBooking = async (req, res) => {
         [cases, stock_id]
       );
       await client.query(
-        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
-        [stock_id, 'added', cases, cases * (item.per_case || 1)]
+        `INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date, customer_name) 
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
+        [stock_id, 'added', cases, cases * (item.per_case || 1), customer_name]
       );
     }
 
@@ -546,8 +547,9 @@ exports.editBooking = async (req, res) => {
         [cases, stock_id]
       );
       await client.query(
-        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
-        [stock_id, 'taken', cases, qty]
+        `INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date, customer_name) 
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
+        [stock_id, 'taken', cases, qty, customer_name]
       );
 
       processedItems.push({
@@ -573,7 +575,7 @@ exports.editBooking = async (req, res) => {
     const grandTotal = Math.round(netBeforeRound);
     const roundOff = grandTotal - netBeforeRound;
 
-    // 5. Regenerate PDF with unique filename
+    // 5. Regenerate PDF
     const timestamp = Date.now();
     const pdfFileName = `bill_${id}_${timestamp}.pdf`;
     const pdfPath = path.join(__dirname, '..', 'uploads', 'pdfs', pdfFileName);
@@ -604,7 +606,7 @@ exports.editBooking = async (req, res) => {
 
     const relativePdfPath = `/uploads/pdfs/${pdfFileName}`;
 
-    // 6. Update booking with safe JSON
+    // 6. Update booking
     await client.query(
       `UPDATE public.bookings SET
         customer_name = $1, address = $2, gstin = $3, lr_number = $4, agent_name = $5,
@@ -626,7 +628,7 @@ exports.editBooking = async (req, res) => {
         taxable_value ? parseFloat(taxable_value) : null,
         stock_from,
         relativePdfPath,
-        JSON.stringify(processedItems), // ← Safe: only numbers/strings
+        JSON.stringify(processedItems),
         id
       ]
     );
@@ -642,7 +644,7 @@ exports.editBooking = async (req, res) => {
   }
 };
 
-// === DELETE BOOKING (Restock all items) ===
+// === DELETE BOOKING: Also log restock with customer_name (optional) ===
 exports.deleteBooking = async (req, res) => {
   const client = await pool.connect();
   const { id } = req.params;
@@ -651,12 +653,12 @@ exports.deleteBooking = async (req, res) => {
     await client.query('BEGIN');
 
     const bookingRes = await client.query(
-      'SELECT items, pdf_path FROM public.bookings WHERE id = $1 FOR UPDATE',
+      'SELECT items, pdf_path, customer_name FROM public.bookings WHERE id = $1 FOR UPDATE',
       [id]
     );
     if (bookingRes.rows.length === 0) throw new Error('Booking not found');
 
-    const { items } = bookingRes.rows[0];
+    const { items, customer_name } = bookingRes.rows[0];
     const parsedItems = JSON.parse(items);
 
     // Restock each item
@@ -669,8 +671,9 @@ exports.deleteBooking = async (req, res) => {
         [cases, stock_id]
       );
       await client.query(
-        'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)',
-        [stock_id, 'added', cases, cases * per_case]
+        `INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, date, customer_name) 
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
+        [stock_id, 'added', cases, cases * per_case, customer_name || 'DELETED']
       );
     }
 

@@ -12,8 +12,8 @@ const pool = new Pool({
 /* ──────────────────────  PRODUCT  ────────────────────── */
 exports.addProduct = async (req, res) => {
   try {
-    const { productname, price, case_count, per_case, brand, product_type } = req.body;
-    if (!productname || !price || !case_count || !per_case || !brand || !product_type)
+    const { productname, price, per_case, brand, product_type } = req.body;
+    if (!productname || !price || !per_case || !brand || !product_type)
       return res.status(400).json({ message: 'All required fields must be provided' });
 
     const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
@@ -30,7 +30,6 @@ exports.addProduct = async (req, res) => {
           id BIGSERIAL PRIMARY KEY,
           productname TEXT NOT NULL,
           price NUMERIC(10,2) NOT NULL,
-          case_count INTEGER NOT NULL,
           per_case INTEGER NOT NULL,
           brand TEXT NOT NULL
         )
@@ -44,9 +43,9 @@ exports.addProduct = async (req, res) => {
     if (dup.rows.length) return res.status(400).json({ message: 'Product already exists for this brand' });
 
     const result = await pool.query(
-      `INSERT INTO public.${tableName} (productname, price, case_count, per_case, brand)
-       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-      [productname, parseFloat(price), parseInt(case_count, 10), parseInt(per_case, 10), brand]
+      `INSERT INTO public.${tableName} (productname, price, per_case, brand)
+       VALUES ($1,$2,$3,$4) RETURNING id`,
+      [productname, parseFloat(price), parseInt(per_case, 10), brand]
     );
 
     res.status(201).json({ message: 'Product saved successfully', id: result.rows[0].id });
@@ -59,15 +58,15 @@ exports.addProduct = async (req, res) => {
 exports.updateProduct = async (req, res) => {
   try {
     const { tableName, id } = req.params;
-    const { productname, price, case_count, per_case, brand } = req.body;
-    if (!productname || !price || !case_count || !per_case || !brand)
+    const { productname, price, per_case, brand } = req.body;
+    if (!productname || !price || !per_case || !brand)
       return res.status(400).json({ message: 'All required fields must be provided' });
 
     const result = await pool.query(
       `UPDATE public.${tableName}
-       SET productname=$1, price=$2, case_count=$3, per_case=$4, brand=$5
-       WHERE id=$6 RETURNING id`,
-      [productname, parseFloat(price), parseInt(case_count, 10), parseInt(per_case, 10), brand, id]
+       SET productname=$1, price=$2, per_case=$3, brand=$4
+       WHERE id=$5 RETURNING id`,
+      [productname, parseFloat(price), parseInt(per_case, 10), brand, id]
     );
 
     if (!result.rows.length) return res.status(404).json({ message: 'Product not found' });
@@ -85,7 +84,7 @@ exports.getProducts = async (req, res) => {
 
     for (const { product_type } of types.rows) {
       const tbl = product_type.toLowerCase().replace(/\s+/g, '_');
-      const rows = await pool.query(`SELECT id, productname, price, case_count, per_case, brand FROM public.${tbl}`);
+      const rows = await pool.query(`SELECT id, productname, price, per_case, brand FROM public.${tbl}`);
       all.push(...rows.rows.map(r => ({ ...r, product_type })));
     }
     res.json(all);
@@ -135,7 +134,6 @@ exports.addProductType = async (req, res) => {
         id BIGSERIAL PRIMARY KEY,
         productname TEXT NOT NULL,
         price NUMERIC(10,2) NOT NULL,
-        case_count INTEGER NOT NULL,
         per_case INTEGER NOT NULL,
         brand TEXT NOT NULL
       )

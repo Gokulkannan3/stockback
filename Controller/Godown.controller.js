@@ -78,36 +78,45 @@ exports.deleteGodown = async (req, res) => {
   }
 };
 exports.addStockToGodown = async (req, res) => {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
     const { godown_id, product_type, productname, brand, cases_added } = req.body;
     if (!godown_id || !product_type || !productname || !brand || !cases_added) {
       return res.status(400).json({ message: 'All fields are required' });
     }
+
     const casesAddedNum = parseInt(cases_added, 10);
     if (isNaN(casesAddedNum) || casesAddedNum <= 0) {
       return res.status(400).json({ message: 'Cases must be a positive number' });
     }
-    const godownCheck = await pool.query('SELECT id FROM public.godown WHERE id = $1', [godown_id]);
+
+    // Validate godown
+    const godownCheck = await client.query('SELECT id FROM public.godown WHERE id = $1', [godown_id]);
     if (godownCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Godown not found' });
     }
+
+    // Validate product in its type table
     const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
-    const productCheck = await pool.query(
-      `SELECT id, per_case FROM public.${tableName} WHERE productname = $1 AND brand = $2`,
+    const productCheck = await client.query(
+      `SELECT id, per_case FROM public."${tableName}" WHERE productname = $1 AND brand = $2`,
       [productname, brand]
     );
     if (productCheck.rows.length === 0) {
-      return res.status(404).json({ message: 'Product not found' });
+      return res.status(404).json({ message: 'Product not found in type table' });
     }
     const per_case = productCheck.rows[0].per_case;
-    await pool.query(`
+
+    // Ensure stock table exists
+    await client.query(`
       CREATE TABLE IF NOT EXISTS public.stock (
         id BIGSERIAL PRIMARY KEY,
         godown_id INTEGER REFERENCES public.godown(id) ON DELETE CASCADE,
         product_type VARCHAR(100) NOT NULL,
         productname VARCHAR(255) NOT NULL,
         brand VARCHAR(100) NOT NULL,
-        brand_id INTEGER REFERENCES public.brand(id),
         current_cases INTEGER NOT NULL DEFAULT 0,
         per_case INTEGER NOT NULL,
         date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -116,7 +125,60 @@ exports.addStockToGodown = async (req, res) => {
         CONSTRAINT unique_stock_entry UNIQUE (godown_id, product_type, productname, brand)
       )
     `);
-    await pool.query(`
+
+    // Ensure brand table & get brand_id
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.brand (
+        id BIGSERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE,
+        agent_name VARCHAR(100)
+      )
+    `);
+
+    const formattedBrand = brand.toLowerCase().replace(/\s+/g, '_');
+    let brandResult = await client.query('SELECT id FROM public.brand WHERE name = $1', [formattedBrand]);
+    if (brandResult.rows.length === 0) {
+      const insertBrand = await client.query(
+        'INSERT INTO public.brand (name) VALUES ($1) RETURNING id',
+        [formattedBrand]
+      );
+      brandResult = insertBrand;
+    }
+    const brand_id = brandResult.rows[0].id;
+
+    // Add brand_id column if not exists
+    await client.query(`
+      ALTER TABLE public.stock 
+      ADD COLUMN IF NOT EXISTS brand_id INTEGER REFERENCES public.brand(id)
+    `);
+
+    // Check existing stock
+    let stockId;
+    const existingStock = await client.query(
+      'SELECT id, current_cases FROM public.stock WHERE godown_id = $1 AND product_type = $2 AND productname = $3 AND brand = $4',
+      [godown_id, product_type, productname, brand]
+    );
+
+    if (existingStock.rows.length > 0) {
+      stockId = existingStock.rows[0].id;
+      const newCases = existingStock.rows[0].current_cases + casesAddedNum;
+
+      await client.query(
+        'UPDATE public.stock SET current_cases = $1, date_added = CURRENT_TIMESTAMP, brand_id = $2 WHERE id = $3',
+        [newCases, brand_id, stockId]
+      );
+    } else {
+      const insertResult = await client.query(
+        `INSERT INTO public.stock 
+         (godown_id, product_type, productname, brand, brand_id, current_cases, per_case) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [godown_id, product_type, productname, brand, brand_id, casesAddedNum, per_case]
+      );
+      stockId = insertResult.rows[0].id;
+    }
+
+    // Insert into history
+    await client.query(`
       CREATE TABLE IF NOT EXISTS public.stock_history (
         id BIGSERIAL PRIMARY KEY,
         stock_id INTEGER REFERENCES public.stock(id) ON DELETE CASCADE,
@@ -126,43 +188,20 @@ exports.addStockToGodown = async (req, res) => {
         date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    // Fetch brand_id from brand table
-    const formattedBrand = brand.toLowerCase().replace(/\s+/g, '_');
-    const brandCheck = await pool.query(
-      'SELECT id FROM public.brand WHERE name = $1',
-      [formattedBrand]
-    );
-    if (brandCheck.rows.length === 0) {
-      return res.status(404).json({ message: 'Brand not found' });
-    }
-    const brand_id = brandCheck.rows[0].id;
-    let stockId;
-    const existingStock = await pool.query(
-      'SELECT id, current_cases FROM public.stock WHERE godown_id = $1 AND product_type = $2 AND productname = $3 AND brand = $4',
-      [godown_id, product_type, productname, brand]
-    );
-    if (existingStock.rows.length > 0) {
-      stockId = existingStock.rows[0].id;
-      const newCases = existingStock.rows[0].current_cases + casesAddedNum;
-      await pool.query(
-        'UPDATE public.stock SET current_cases = $1, date_added = CURRENT_TIMESTAMP WHERE id = $2',
-        [newCases, stockId]
-      );
-    } else {
-      const insertResult = await pool.query(
-        'INSERT INTO public.stock (godown_id, product_type, productname, brand, brand_id, current_cases, per_case) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-        [godown_id, product_type, productname, brand, brand_id, casesAddedNum, per_case]
-      );
-      stockId = insertResult.rows[0].id;
-    }
-    await pool.query(
+
+    await client.query(
       'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total) VALUES ($1, $2, $3, $4)',
       [stockId, 'added', casesAddedNum, casesAddedNum * per_case]
     );
+
+    await client.query('COMMIT');
     res.status(201).json({ message: 'Stock added successfully', stock_id: stockId });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('Error in addStockToGodown:', err.message);
-    res.status(500).json({ message: 'Failed to add stock' });
+    res.status(500).json({ message: 'Failed to add stock', error: err.message });
+  } finally {
+    client.release();
   }
 };
 exports.getStockByGodown = async (req, res) => {
@@ -314,7 +353,8 @@ exports.getStockHistory = async (req, res) => {
           s.brand,
           s.product_type,
           s.per_case * h.cases AS per_case_total,
-          COALESCE(b.agent_name, '-') AS agent_name
+          COALESCE(b.agent_name, '-') AS agent_name,
+          COALESCE(h.customer_name, '-') AS customer_name   -- from stock_history
        FROM public.stock_history h
        JOIN public.stock s ON h.stock_id = s.id
        LEFT JOIN public.brand b ON s.brand = b.name
@@ -335,39 +375,52 @@ exports.exportGodownStockToExcel = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Admin System';
     workbook.lastModifiedBy = 'Admin System';
+
     for (const godown of godowns) {
       const stockResult = await pool.query(
         `SELECT
             s.*,
             g.name AS godown_name,
-            COALESCE(b.agent_name, '-') AS agent_name
+            COALESCE(b.agent_name, '-') AS agent_name,
+            COALESCE(latest_taken.customer_name, '-') AS last_customer_name,
+            COALESCE(latest_taken.agent_name, '-') AS last_agent_name
          FROM public.stock s
          JOIN public.godown g ON s.godown_id = g.id
          LEFT JOIN public.brand b ON s.brand = b.name
+         LEFT JOIN LATERAL (
+           SELECT h.customer_name, h.agent_name
+           FROM public.stock_history h
+           WHERE h.stock_id = s.id
+             AND h.action = 'taken'
+           ORDER BY h.date DESC
+           LIMIT 1
+         ) latest_taken ON TRUE
          WHERE s.godown_id = $1
          ORDER BY s.productname`,
         [godown.id]
       );
-      const worksheet = workbook.addWorksheet(godown.name, {
-        properties: { defaultColWidth: 15 }
-      });
+
+      const worksheet = workbook.addWorksheet(godown.name, { properties: { defaultColWidth: 15 } });
       worksheet.columns = [
         { header: 'Product Type', key: 'product_type', width: 20 },
         { header: 'Product Name', key: 'productname', width: 30 },
         { header: 'Brand', key: 'brand', width: 15 },
-        { header: 'Agent', key: 'agent_name', width: 20 },
+        { header: 'Name', key: 'display_name', width: 22 },
         { header: 'Current Cases', key: 'current_cases', width: 15 },
         { header: 'Per Case', key: 'per_case', width: 10 },
         { header: 'Taken Cases', key: 'taken_cases', width: 15 },
         { header: 'Date Added', key: 'date_added', width: 20 },
         { header: 'Last Taken Date', key: 'last_taken_date', width: 20 },
       ];
+
       stockResult.rows.forEach(row => {
         worksheet.addRow({
           product_type: row.product_type,
           productname: row.productname,
           brand: row.brand,
-          agent_name: row.agent_name,
+          display_name: row.last_customer_name !== '-' 
+            ? row.last_customer_name 
+            : row.last_agent_name,
           current_cases: row.current_cases,
           per_case: row.per_case,
           taken_cases: row.taken_cases || 0,
@@ -375,6 +428,7 @@ exports.exportGodownStockToExcel = async (req, res) => {
           last_taken_date: row.last_taken_date || '',
         });
       });
+
       worksheet.getRow(1).font = { bold: true };
       worksheet.getRow(1).fill = {
         type: 'pattern',
@@ -382,6 +436,7 @@ exports.exportGodownStockToExcel = async (req, res) => {
         fgColor: { argb: 'FFCCCCCC' },
       };
     }
+
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
