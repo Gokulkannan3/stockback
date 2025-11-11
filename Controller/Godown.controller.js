@@ -493,3 +493,96 @@ exports.getGodownsFast = async (req, res) => {
     res.status(500).json({ message: 'Failed' });
   }
 };
+
+// POST /api/godowns/bulk-allocate
+exports.bulkAllocate = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { allocations } = req.body;
+    if (!Array.isArray(allocations) || allocations.length === 0) {
+      return res.status(400).json({ message: 'No allocations provided' });
+    }
+
+    await client.query('BEGIN');
+
+    const results = [];
+
+    for (const alloc of allocations) {
+      const {
+        godown_id,
+        product_type,
+        productname,
+        brand,
+        per_case,
+        cases_added
+      } = alloc;
+
+      const cases = parseInt(cases_added, 10);
+      if (isNaN(cases) || cases <= 0) continue;
+
+      // --- Brand: Insert if not exists ---
+      const fmtBrand = brand.toLowerCase().replace(/\s+/g, '_');
+      let brandRes = await client.query(
+        'SELECT id FROM public.brand WHERE name = $1',
+        [fmtBrand]
+      );
+      if (brandRes.rows.length === 0) {
+        brandRes = await client.query(
+          'INSERT INTO public.brand (name) VALUES ($1) RETURNING id',
+          [fmtBrand]
+        );
+      }
+      const brand_id = brandRes.rows[0].id;
+
+      // --- Stock: Update or Insert ---
+      const exist = await client.query(
+        `SELECT id, current_cases FROM public.stock 
+         WHERE godown_id = $1 AND product_type = $2 AND productname = $3 AND brand = $4`,
+        [godown_id, product_type, productname, brand]
+      );
+
+      let stockId;
+      if (exist.rows.length > 0) {
+        stockId = exist.rows[0].id;
+        const newCases = exist.rows[0].current_cases + cases;
+        await client.query(
+          `UPDATE public.stock 
+           SET current_cases = $1, date_added = CURRENT_TIMESTAMP, brand_id = $2 
+           WHERE id = $3`,
+          [newCases, brand_id, stockId]
+        );
+      } else {
+        const ins = await client.query(
+          `INSERT INTO public.stock 
+           (godown_id, product_type, productname, brand, brand_id, current_cases, per_case)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) 
+           RETURNING id`,
+          [godown_id, product_type, productname, brand, brand_id, cases, per_case]
+        );
+        stockId = ins.rows[0].id;
+      }
+
+      // --- History ---
+      await client.query(
+        `INSERT INTO public.stock_history (stock_id, action, cases, per_case_total)
+         VALUES ($1, 'added', $2, $3)`,
+        [stockId, cases, cases * per_case]
+      );
+
+      results.push({ godown_id, productname, brand, cases_added: cases });
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: 'Bulk allocation completed',
+      added: results.length,
+      details: results
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('bulkAllocate error:', err.message);
+    res.status(500).json({ message: 'Failed to allocate stock' });
+  } finally {
+    client.release();
+  }
+};
