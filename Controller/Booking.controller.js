@@ -25,11 +25,19 @@ const formatDate = (dateStr) => {
 exports.createBooking = async (req, res) => {
   const client = await pool.connect();
   try {
+    // ── 1. Extract ALL fields (including apply_* flags) ──
     const {
       customer_name, address, gstin, lr_number, agent_name,
       from: fromLoc, to: toLoc, through,
-      additional_discount = 0, packing_percent = 3.0,
-      taxable_value, stock_from, items = []
+      additional_discount = 0,
+      packing_percent = 3.0,
+      taxable_value,
+      stock_from,
+      items = [],
+      apply_processing_fee = false,
+      apply_cgst = false,
+      apply_sgst = false,
+      apply_igst = false
     } = req.body;
 
     if (!customer_name || !items.length || !fromLoc || !toLoc || !through) {
@@ -43,10 +51,9 @@ exports.createBooking = async (req, res) => {
 
     let subtotal = 0;
     let totalCases = 0;
-
     const processedItems = [];
 
-    // Process each item → reduce stock + log history with customer_name
+    // ── 2. Process items (stock reduce + history) ──
     for (const [idx, item] of items.entries()) {
       const {
         id: stock_id,
@@ -58,7 +65,6 @@ exports.createBooking = async (req, res) => {
         throw new Error(`Invalid item at index ${idx}: Missing stock_id or data`);
       }
 
-      // === STEP 1: Lock & check stock ===
       const stockCheck = await client.query(
         'SELECT current_cases, per_case, taken_cases FROM public.stock WHERE id = $1 FOR UPDATE',
         [stock_id]
@@ -73,7 +79,6 @@ exports.createBooking = async (req, res) => {
         throw new Error(`Insufficient stock: ${productname} (Available: ${current_cases}, Requested: ${cases})`);
       }
 
-      // === STEP 2: Calculate amount ===
       const qty = cases * per_case;
       const amountBefore = qty * rate_per_box;
       const discountAmt = amountBefore * (discount_percent / 100);
@@ -82,7 +87,6 @@ exports.createBooking = async (req, res) => {
       subtotal += finalAmt;
       totalCases += cases;
 
-      // === STEP 3: Update stock ===
       const newCases = current_cases - cases;
       const newTakenCases = (taken_cases || 0) + cases;
 
@@ -91,7 +95,6 @@ exports.createBooking = async (req, res) => {
         [newCases, newTakenCases, stock_id]
       );
 
-      // === STEP 4: Log in history WITH customer_name ===
       await client.query(
         `INSERT INTO public.stock_history 
          (stock_id, action, cases, per_case_total, date, customer_name) 
@@ -99,7 +102,6 @@ exports.createBooking = async (req, res) => {
         [stock_id, 'taken', cases, cases * per_case, customer_name]
       );
 
-      // === STEP 5: Save for PDF ===
       processedItems.push({
         s_no: idx + 1,
         productname,
@@ -114,16 +116,33 @@ exports.createBooking = async (req, res) => {
       });
     }
 
-    // === Calculate totals ===
-    const packingCharges = subtotal * (packing_percent / 100);
+    // ── 3. CALCULATE TOTALS (WITH TAX LOGIC) ──
+    const packingCharges = apply_processing_fee ? subtotal * (packing_percent / 100) : 0;
     const subtotalWithPacking = subtotal + packingCharges;
-    const taxableUsed = taxable_value ? parseFloat(taxable_value) : subtotalWithPacking;
-    const addlDiscountAmt = taxableUsed * (additional_discount / 100);
-    const netBeforeRound = taxableUsed - addlDiscountAmt;
-    const grandTotal = Math.round(netBeforeRound);
-    const roundOff = grandTotal - netBeforeRound;
 
-    // === Generate PDF ===
+    // Taxable value = subtotalWithPacking + user-added taxable_value
+    const userTaxable = taxable_value ? parseFloat(taxable_value) : 0;
+    const taxableUsed = subtotalWithPacking + userTaxable;
+
+    const addlDiscountAmt = taxableUsed * (additional_discount / 100);
+    const netBeforeTax = taxableUsed - addlDiscountAmt;
+
+    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+
+    // ── TAX LOGIC: IGST overrides CGST+SGST ──
+    if (apply_igst) {
+      igstAmt = netBeforeTax * 0.18;
+    } else if (apply_cgst && apply_sgst) {
+      cgstAmt = netBeforeTax * 0.09;
+      sgstAmt = netBeforeTax * 0.09;
+    }
+    // If only one of CGST/SGST is true → ignore (invalid)
+
+    const totalTax = cgstAmt + sgstAmt + igstAmt;
+    const grandTotal = Math.round(netBeforeTax + totalTax);
+    const roundOff = grandTotal - (netBeforeTax + totalTax);
+
+    // ── 4. GENERATE PDF ──
     const pdfFileName = `bill_${bill_number}.pdf`;
     const pdfPath = path.join(__dirname, '..', 'uploads', 'pdfs', pdfFileName);
     fs.mkdirSync(path.dirname(pdfPath), { recursive: true });
@@ -132,23 +151,31 @@ exports.createBooking = async (req, res) => {
       bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
       from: fromLoc, to: toLoc, through, items: processedItems,
       subtotal, packingCharges, subtotalWithPacking, taxableUsed, addlDiscountAmt,
-      roundOff, grandTotal, totalCases, stock_from, packing_percent
+      roundOff, grandTotal, totalCases, stock_from, packing_percent,
+      cgstAmt, sgstAmt, igstAmt
     }, pdfPath);
 
     const relativePdfPath = `/uploads/pdfs/${pdfFileName}`;
 
-    // === Save booking ===
+    // ── 5. SAVE TO DB (extra_charges includes all) ──
     await client.query(
       `INSERT INTO public.bookings (
         bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
-        "from", "to", "through", additional_discount, packing_percent, taxable_value,
-        stock_from, pdf_path, items
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+        "from", "to", "through", stock_from, pdf_path, items, total, extra_charges
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
-        fromLoc, toLoc, through, additional_discount, packing_percent,
-        taxable_value ? parseFloat(taxable_value) : null, stock_from, relativePdfPath,
-        JSON.stringify(processedItems)
+        fromLoc, toLoc, through, stock_from, relativePdfPath,
+        JSON.stringify(processedItems), grandTotal,
+        JSON.stringify({
+          packing_percent: parseFloat(packing_percent) || 0,
+          additional_discount: parseFloat(additional_discount) || 0,
+          taxable_value: userTaxable,
+          apply_processing_fee,
+          apply_cgst,
+          apply_sgst,
+          apply_igst
+        })
       ]
     );
 
@@ -343,8 +370,12 @@ const generatePDF = (data, outputPath) => {
 exports.getBookings = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, bill_number, bill_date, customer_name, "from", "to", items, pdf_path
-      FROM public.bookings ORDER BY created_at DESC
+      SELECT 
+        id, bill_number, bill_date, customer_name, address, gstin,
+        "from", "to", through, lr_number,
+        items, pdf_path, created_at
+      FROM public.bookings 
+      ORDER BY created_at DESC
     `);
     res.json(result.rows);
   } catch (err) {

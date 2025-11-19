@@ -28,12 +28,8 @@ app.use('/api', require('./Router/Analysis.router'));
 app.use('/api', require('./Router/Search.router'));
 app.use('/api', require('./Router/GodownAnalytics.router'));
 app.use('/api', require('./Router/Booking.router'));
-// app.use('/api/locations', require('./Router/Location.router'));
-// app.use('/api/directcust', require('./Router/Directcust.router'));
-// app.use('/api/direct', require('./Router/Direct.router'));
-// app.use('/api/tracking', require('./Router/Tracking.router'));
-// app.use('/api', require('./Router/Banner.router'));
-// app.use('/api', require('./Router/Promocode.router'));
+app.use('/api', require('./Router/Wdispatch.router'));
+app.use('/api', require('./Router/Payments.router'));
 
 app.use((err, req, res, next) => {
   console.error('🔥 Error:', err.stack || err);
