@@ -204,13 +204,11 @@ const generatePDF = (data, outputPath) => {
     const rightX = 350;
     const tableStartX = leftX;
     const tableWidth = 490;
-    
-    // === DYNAMIC COLUMN WIDTHS (Sum = 490) ===
-    const colWidths = [35, 130, 45, 45, 55, 65, 65, 50]; // Optimized for content
+    const colWidths = [35, 130, 45, 45, 55, 65, 65, 50];
     const rowHeight = 20;
     const cellPadding = 4;
 
-    // === CUSTOMER INFO & BILL DETAILS ===
+    // === CUSTOMER & BILL INFO ===
     const startY = 100;
     doc.font('Helvetica-Bold').fontSize(10);
     doc.text('Customer Information', leftX, startY);
@@ -226,31 +224,24 @@ const generatePDF = (data, outputPath) => {
     doc.text(`Bill DATE   : ${formatDate(data.bill_date)}`, rightX, startY + 30);
     doc.text(`Agent Name : ${data.agent_name || 'DIRECT'}`, rightX, startY + 45);
     doc.text(`L.R. NUMBER : ${data.lr_number || ''}`, rightX, startY + 60);
-    doc.text(`No. of Cases : ${data.totalCases}`, rightX,startY + 75).fontSize(15);
+    doc.text(`No. of Cases : ${data.totalCases}`, rightX, startY + 75).fontSize(15);
 
     // === TABLE ===
     let y = startY + 90;
     const headers = ['S.No', 'Product', 'Case', 'Per', 'Qty', 'Rate', 'Amount', 'From'];
-
-    // Pre-calculate vertical lines
     const verticalLines = [tableStartX];
     colWidths.forEach(w => verticalLines.push(verticalLines[verticalLines.length - 1] + w));
-
     let x = tableStartX;
 
-    // === HEADER (WITH FULL BLACK BORDERS) ===
+    // Header
     const headerTop = y;
     const headerBottom = y + rowHeight;
-
-    // Full black border around header
     doc.lineWidth(0.8).strokeColor('black');
     doc.moveTo(tableStartX, headerTop).lineTo(tableStartX + tableWidth, headerTop).stroke();
     doc.moveTo(tableStartX, headerBottom).lineTo(tableStartX + tableWidth, headerBottom).stroke();
     verticalLines.forEach(vx => {
       doc.moveTo(vx, headerTop).lineTo(vx, headerBottom).stroke();
     });
-
-    // Header text (centered)
     doc.font('Helvetica-Bold').fontSize(9);
     headers.forEach((h, i) => {
       doc.text(h, x + cellPadding, y + cellPadding, {
@@ -259,64 +250,50 @@ const generatePDF = (data, outputPath) => {
       });
       x += colWidths[i];
     });
-
     y += rowHeight + 1;
 
-    // === ROWS ===
+    // Rows
     doc.font('Helvetica').fontSize(9);
-    data.items.forEach((item, index) => {
+    data.items.forEach((item) => {
       x = tableStartX;
       const row = [
-        (index + 1).toString(),
+        item.s_no.toString(),
         item.productname,
         item.cases.toString(),
         item.per_case.toString(),
-        (item.cases * item.per_case).toString(),
+        item.quantity.toString(),
         `${item.rate_per_box.toFixed(2)}`,
         item.amount.toFixed(2),
         item.godown
       ];
-
       const rowTop = y;
       const rowBottom = y + rowHeight;
-
-      // === FULL BLACK GRID ===
       doc.lineWidth(0.4).strokeColor('black');
-
-      // Horizontal
       doc.moveTo(tableStartX, rowTop).lineTo(tableStartX + tableWidth, rowTop).stroke();
       doc.moveTo(tableStartX, rowBottom).lineTo(tableStartX + tableWidth, rowBottom).stroke();
-
-      // Vertical
       verticalLines.forEach(vx => {
         doc.moveTo(vx, rowTop).lineTo(vx, rowBottom).stroke();
       });
-
-      // === TEXT (CENTERED) ===
-      doc.fillColor('black');
       row.forEach((text, i) => {
-        const align ='center'; // Product name left-aligned
         doc.text(text, x + cellPadding, y + cellPadding, {
           width: colWidths[i] - 2 * cellPadding,
-          align
+          align: 'center'
         });
         x += colWidths[i];
       });
-
       y += rowHeight + 1;
     });
 
-    // === FINAL BOTTOM BORDER ===
+    // Bottom border
     doc.lineWidth(0.8)
        .moveTo(tableStartX, y - 1)
        .lineTo(tableStartX + tableWidth, y - 1)
        .strokeColor('black')
        .stroke();
 
-    // === TRANSPORT & TOTALS ===
+    // === TOTALS ===
     y += 15;
     const transportStartY = y;
-
     doc.font('Helvetica-Bold').fontSize(10);
     doc.text('Transport Details', leftX, transportStartY);
     doc.font('Helvetica').fontSize(10);
@@ -331,6 +308,9 @@ const generatePDF = (data, outputPath) => {
       [`PACKING @ ${data.packing_percent}%`, data.packingCharges.toFixed(2)],
       ['SUB TOTAL', data.subtotalWithPacking.toFixed(2)],
       ['TAXABLE VALUE', data.taxableUsed.toFixed(2)],
+      ...(data.apply_cgst ? [['CGST @ 9%', data.cgstAmt.toFixed(2)]] : []),
+      ...(data.apply_sgst ? [['SGST @ 9%', data.sgstAmt.toFixed(2)]] : []),
+      ...(data.apply_igst ? [['IGST @ 18%', data.igstAmt.toFixed(2)]] : []),
       ['ROUND OFF', data.roundOff.toFixed(2)],
       [''],
     ];
@@ -348,13 +328,13 @@ const generatePDF = (data, outputPath) => {
       ty += 15;
     });
 
-    // Highlight NET AMOUNT
+    // NET AMOUNT
     const netY = ty;
     doc.font('Helvetica-Bold').fontSize(11)
        .text('NET AMOUNT', labelX, netY)
        .text(data.grandTotal.toFixed(2), valueX, netY, { width: valueWidth, align: 'right' });
 
-    // === FOOTER ===
+    // FOOTER
     y = Math.max(y, ty) + 35;
     doc.fontSize(8).font('Helvetica')
        .text('Note:', leftX, y)
