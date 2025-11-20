@@ -56,7 +56,7 @@ exports.getAdminTransactions = async (req, res) => {
     const result = await pool.query(`
       SELECT p.*, b.customer_name, b.bill_number
       FROM payments p
-      JOIN book b ON p.booking_id = b.id
+      JOIN bookings b ON p.booking_id = b.id
       WHERE p.admin_id = $1
       ORDER BY p.transaction_date DESC
     `, [id]);

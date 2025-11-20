@@ -301,18 +301,19 @@ const generatePDF = (data, outputPath) => {
     doc.text(`To           : ${data.to}`, leftX, transportStartY + 30);
     doc.text(`Through      : ${data.through}`, leftX, transportStartY + 45);
 
+    // Fixed: Only show tax lines if the amount is > 0 (i.e., tax was applied)
     const totals = [
       ['GOODS VALUE', data.subtotal.toFixed(2)],
-      ['SPECIAL DISCOUNT', `-${data.addlDiscountAmt.toFixed(2)}`],
+      ...(data.addlDiscountAmt > 0 ? [['SPECIAL DISCOUNT', `-${data.addlDiscountAmt.toFixed(2)}`]] : []),
       ['SUB TOTAL', data.subtotal.toFixed(2)],
-      [`PACKING @ ${data.packing_percent}%`, data.packingCharges.toFixed(2)],
+      ...(data.packingCharges > 0 ? [[`PACKING @ ${data.packing_percent}%`, data.packingCharges.toFixed(2)]] : []),
       ['SUB TOTAL', data.subtotalWithPacking.toFixed(2)],
       ['TAXABLE VALUE', data.taxableUsed.toFixed(2)],
-      ...(data.apply_cgst ? [['CGST @ 9%', data.cgstAmt.toFixed(2)]] : []),
-      ...(data.apply_sgst ? [['SGST @ 9%', data.sgstAmt.toFixed(2)]] : []),
-      ...(data.apply_igst ? [['IGST @ 18%', data.igstAmt.toFixed(2)]] : []),
+      ...(data.cgstAmt > 0 ? [['CGST @ 9%', data.cgstAmt.toFixed(2)]] : []),
+      ...(data.sgstAmt > 0 ? [['SGST @ 9%', data.sgstAmt.toFixed(2)]] : []),
+      ...(data.igstAmt > 0 ? [['IGST @ 18%', data.igstAmt.toFixed(2)]] : []),
       ['ROUND OFF', data.roundOff.toFixed(2)],
-      [''],
+      [''], // empty line before net amount
     ];
 
     let ty = transportStartY;
@@ -322,24 +323,27 @@ const generatePDF = (data, outputPath) => {
 
     doc.font('Helvetica').fontSize(10);
     totals.forEach(([label, value]) => {
+      if (!label) return; // skip empty lines for spacing
       const lineY = ty + 15;
       doc.text(label, labelX, lineY, { align: 'left' });
-      doc.text(value, valueX, lineY, { width: valueWidth, align: 'right' });
+      if (value !== undefined) {
+        doc.text(value, valueX, lineY, { width: valueWidth, align: 'right' });
+      }
       ty += 15;
     });
 
     // NET AMOUNT
-    const netY = ty;
-    doc.font('Helvetica-Bold').fontSize(11)
+    const netY = ty + 10;
+    doc.font('Helvetica-Bold').fontSize(12)
        .text('NET AMOUNT', labelX, netY)
-       .text(data.grandTotal.toFixed(2), valueX, netY, { width: valueWidth, align: 'right' });
+       .text(`Rs.${data.grandTotal.toFixed(2)}`, valueX, netY, { width: valueWidth, align: 'right' });
 
     // FOOTER
-    y = Math.max(y, ty) + 35;
+    const footerY = Math.max(y, ty) + 50;
     doc.fontSize(8).font('Helvetica')
-       .text('Note:', leftX, y)
-       .text('1. Company not responsible for transit loss/damage', leftX + 10, y + 12)
-       .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, y + 24);
+       .text('Note:', leftX, footerY)
+       .text('1. Company not responsible for transit loss/damage', leftX + 10, footerY + 12)
+       .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, footerY + 24);
 
     doc.end();
     stream.on('finish', resolve);
