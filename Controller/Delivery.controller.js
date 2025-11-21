@@ -13,47 +13,67 @@ exports.createDeliveryChallan = async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { name, address, gstin, lr_number, from = 'SIVAKASI', to, through, items } = req.body;
-    const user = req.body.created_by || 'Admin';
 
+    const {
+      name, address, gstin, lr_number,
+      from = 'SIVAKASI', to, through, items
+    } = req.body;
+
+    const user = req.body.created_by || 'Admin';
     const challan_number = await generateChallanNumber();
 
     const itemsWithRate = [];
 
     for (const item of items) {
-      const { id, cases, per_case } = item;
+      const { id, cases, per_case, product_type } = item;   // <-- make sure product_type is sent per item
 
-      // Fetch current rate_per_box from stock
-      const rateRes = await client.query(
-        'SELECT rate_per_box FROM stock WHERE id = $1',
-        [id]
-      );
-
-      if (rateRes.rows.length === 0) {
-        throw new Error(`Stock ID ${id} not found`);
+      if (!product_type) {
+        throw new Error(`product_type is required for item with stock id ${id}`);
       }
 
-      const rate_per_box = parseFloat(rateRes.rows[0].rate_per_box) || 0;
+      // Build safe table name (public.schema is fixed)
+      const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
 
-      // Reduce stock
+      // ---- 1. Fetch the current price (rate_per_box) from the dynamic table ----
+      const priceQuery = `
+        SELECT price 
+        FROM public."${tableName}" 
+        WHERE id = $1
+      `;
+
+      const priceRes = await client.query(priceQuery, [id]);
+
+      if (priceRes.rows.length === 0) {
+        throw new Error(`Item id ${id} not found in table public.${tableName}`);
+      }
+
+      const rate_per_box = parseFloat(priceRes.rows[0].price) || 0;
+
+      // ---- 2. Reduce stock (still using your central stock table) ----
       await client.query(
-        'UPDATE stock SET current_cases = current_cases - $1, taken_cases = COALESCE(taken_cases,0) + $1 WHERE id = $2',
+        `UPDATE stock 
+         SET current_cases = current_cases - $1,
+             taken_cases = COALESCE(taken_cases, 0) + $1 
+         WHERE id = $2`,
         [cases, id]
       );
 
+      // ---- 3. Log stock history ----
       await client.query(
-        'INSERT INTO stock_history (stock_id, action, cases, per_case_total, date, customer_name) VALUES ($1, $2, $3, $4, NOW(), $5)',
+        `INSERT INTO stock_history 
+         (stock_id, action, cases, per_case_total, date, customer_name)
+         VALUES ($1, $2, $3, $4, NOW(), $5)`,
         [id, 'taken', cases, cases * per_case, name]
       );
 
-      // Save rate_per_box inside item
+      // ---- 4. Keep the rate inside the item for the delivery record ----
       itemsWithRate.push({
         ...item,
-        rate_per_box // ← THIS IS THE KEY FIX
+        rate_per_box   // this is what will be saved in delivery.items JSON
       });
     }
 
-    // Save full items with rate_per_box into delivery table
+    // ---- 5. Insert the full delivery challan ----
     await client.query(
       `INSERT INTO delivery (
         challan_number, customer_name, address, gstin, lr_number,
@@ -69,8 +89,8 @@ exports.createDeliveryChallan = async (req, res) => {
     res.json({ challan_number, message: 'Challan created successfully' });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
-    res.status(500).json({ message: err.message });
+    console.error('Error in createDeliveryChallan:', err);
+    res.status(500).json({ message: err.message || 'Internal server error' });
   } finally {
     client.release();
   }
