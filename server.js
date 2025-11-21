@@ -30,6 +30,7 @@ app.use('/api', require('./Router/GodownAnalytics.router'));
 app.use('/api', require('./Router/Booking.router'));
 app.use('/api', require('./Router/Wdispatch.router'));
 app.use('/api', require('./Router/Payments.router'));
+app.use('/api', require('./Router/Delivery.router'));
 
 app.use((err, req, res, next) => {
   console.error('🔥 Error:', err.stack || err);

@@ -25,10 +25,9 @@ const formatDate = (dateStr) => {
 exports.createBooking = async (req, res) => {
   const client = await pool.connect();
   try {
-    // ── 1. Extract ALL fields (including apply_* flags) ──
     const {
-      customer_name, address, gstin, lr_number, agent_name,
-      from: fromLoc, to: toLoc, through,
+      customer_name, address, gstin, lr_number, agent_name = 'DIRECT',
+      from: fromLoc = 'SIVAKASI', to: toLoc, through,
       additional_discount = 0,
       packing_percent = 3.0,
       taxable_value,
@@ -37,12 +36,18 @@ exports.createBooking = async (req, res) => {
       apply_processing_fee = false,
       apply_cgst = false,
       apply_sgst = false,
-      apply_igst = false
+      apply_igst = false,
+      from_challan = false,
+      challan_id = null,           // ← NEW: From frontend
+      is_direct_bill = false
     } = req.body;
 
-    if (!customer_name || !items.length || !fromLoc || !toLoc || !through) {
+    if (!customer_name || !items.length || !toLoc || !through) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
+
+    const isDirectBillRoute = req.path.includes('/direct');
+    const shouldDeductStock = isDirectBillRoute && !from_challan;
 
     await client.query('BEGIN');
 
@@ -53,7 +58,6 @@ exports.createBooking = async (req, res) => {
     let totalCases = 0;
     const processedItems = [];
 
-    // ── 2. Process items (stock reduce + history) ──
     for (const [idx, item] of items.entries()) {
       const {
         id: stock_id,
@@ -62,21 +66,38 @@ exports.createBooking = async (req, res) => {
       } = item;
 
       if (!stock_id || !productname || !brand || !cases || !per_case || rate_per_box === undefined) {
-        throw new Error(`Invalid item at index ${idx}: Missing stock_id or data`);
+        throw new Error(`Invalid item at index ${idx}: Missing data`);
       }
 
-      const stockCheck = await client.query(
-        'SELECT current_cases, per_case, taken_cases FROM public.stock WHERE id = $1 FOR UPDATE',
-        [stock_id]
-      );
+      if (shouldDeductStock) {
+        const stockCheck = await client.query(
+          'SELECT current_cases, per_case, taken_cases FROM public.stock WHERE id = $1 FOR UPDATE',
+          [stock_id]
+        );
 
-      if (stockCheck.rows.length === 0) {
-        throw new Error(`Stock entry not found for ID: ${stock_id}`);
-      }
+        if (stockCheck.rows.length === 0) {
+          throw new Error(`Stock entry not found for ID: ${stock_id}`);
+        }
 
-      const { current_cases, taken_cases } = stockCheck.rows[0];
-      if (cases > current_cases) {
-        throw new Error(`Insufficient stock: ${productname} (Available: ${current_cases}, Requested: ${cases})`);
+        const { current_cases, taken_cases = 0 } = stockCheck.rows[0];
+        if (cases > current_cases) {
+          throw new Error(`Insufficient stock: ${productname} (Available: ${current_cases}, Requested: ${cases})`);
+        }
+
+        const newCases = current_cases - cases;
+        const newTakenCases = (taken_cases || 0) + cases;
+
+        await client.query(
+          'UPDATE public.stock SET current_cases = $1, taken_cases = $2, last_taken_date = CURRENT_TIMESTAMP WHERE id = $3',
+          [newCases, newTakenCases, stock_id]
+        );
+
+        await client.query(
+          `INSERT INTO public.stock_history 
+           (stock_id, action, cases, per_case_total, date, customer_name) 
+           VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
+          [stock_id, 'taken', cases, cases * per_case, customer_name]
+        );
       }
 
       const qty = cases * per_case;
@@ -86,21 +107,6 @@ exports.createBooking = async (req, res) => {
 
       subtotal += finalAmt;
       totalCases += cases;
-
-      const newCases = current_cases - cases;
-      const newTakenCases = (taken_cases || 0) + cases;
-
-      await client.query(
-        'UPDATE public.stock SET current_cases = $1, taken_cases = $2, last_taken_date = CURRENT_TIMESTAMP WHERE id = $3',
-        [newCases, newTakenCases, stock_id]
-      );
-
-      await client.query(
-        `INSERT INTO public.stock_history 
-         (stock_id, action, cases, per_case_total, date, customer_name) 
-         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5)`,
-        [stock_id, 'taken', cases, cases * per_case, customer_name]
-      );
 
       processedItems.push({
         s_no: idx + 1,
@@ -112,37 +118,29 @@ exports.createBooking = async (req, res) => {
         rate_per_box,
         discount_percent: parseFloat(discount_percent),
         amount: parseFloat(finalAmt.toFixed(2)),
-        godown: godown || stock_from
+        godown: godown || stock_from || fromLoc
       });
     }
 
-    // ── 3. CALCULATE TOTALS (WITH TAX LOGIC) ──
     const packingCharges = apply_processing_fee ? subtotal * (packing_percent / 100) : 0;
     const subtotalWithPacking = subtotal + packingCharges;
-
-    // Taxable value = subtotalWithPacking + user-added taxable_value
     const userTaxable = taxable_value ? parseFloat(taxable_value) : 0;
     const taxableUsed = subtotalWithPacking + userTaxable;
-
     const addlDiscountAmt = taxableUsed * (additional_discount / 100);
     const netBeforeTax = taxableUsed - addlDiscountAmt;
 
     let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
-
-    // ── TAX LOGIC: IGST overrides CGST+SGST ──
     if (apply_igst) {
       igstAmt = netBeforeTax * 0.18;
     } else if (apply_cgst && apply_sgst) {
       cgstAmt = netBeforeTax * 0.09;
       sgstAmt = netBeforeTax * 0.09;
     }
-    // If only one of CGST/SGST is true → ignore (invalid)
 
     const totalTax = cgstAmt + sgstAmt + igstAmt;
     const grandTotal = Math.round(netBeforeTax + totalTax);
     const roundOff = grandTotal - (netBeforeTax + totalTax);
 
-    // ── 4. GENERATE PDF ──
     const pdfFileName = `bill_${bill_number}.pdf`;
     const pdfPath = path.join(__dirname, '..', 'uploads', 'pdfs', pdfFileName);
     fs.mkdirSync(path.dirname(pdfPath), { recursive: true });
@@ -151,21 +149,20 @@ exports.createBooking = async (req, res) => {
       bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
       from: fromLoc, to: toLoc, through, items: processedItems,
       subtotal, packingCharges, subtotalWithPacking, taxableUsed, addlDiscountAmt,
-      roundOff, grandTotal, totalCases, stock_from, packing_percent,
+      roundOff, grandTotal, totalCases, stock_from: stock_from || fromLoc, packing_percent,
       cgstAmt, sgstAmt, igstAmt
     }, pdfPath);
 
     const relativePdfPath = `/uploads/pdfs/${pdfFileName}`;
 
-    // ── 5. SAVE TO DB (extra_charges includes all) ──
     await client.query(
       `INSERT INTO public.bookings (
         bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
-        "from", "to", "through", stock_from, pdf_path, items, total, extra_charges
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        "from", "to", "through", stock_from, pdf_path, items, total, extra_charges, from_challan
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         bill_number, bill_date, customer_name, address, gstin, lr_number, agent_name,
-        fromLoc, toLoc, through, stock_from, relativePdfPath,
+        fromLoc, toLoc, through, stock_from || fromLoc, relativePdfPath,
         JSON.stringify(processedItems), grandTotal,
         JSON.stringify({
           packing_percent: parseFloat(packing_percent) || 0,
@@ -174,13 +171,37 @@ exports.createBooking = async (req, res) => {
           apply_processing_fee,
           apply_cgst,
           apply_sgst,
-          apply_igst
-        })
+          apply_igst,
+          is_direct_bill: isDirectBillRoute,
+          from_challan
+        }),
+        from_challan
       ]
     );
 
+    // MARK CHALLAN AS CONVERTED
+    if (from_challan && challan_id) {
+      try {
+        await client.query(
+          `UPDATE delivery SET converted_to_bill = TRUE, converted_at = NOW() WHERE id = $1`,
+          [challan_id]
+        );
+      } catch (err) {
+        console.error('Failed to mark challan as converted:', err);
+        // Don't fail the bill if this fails
+      }
+    }
+
     await client.query('COMMIT');
-    res.json({ message: 'Booking created', bill_number, pdfPath: relativePdfPath });
+
+    res.json({
+      message: 'Bill created successfully',
+      bill_number,
+      pdfPath: relativePdfPath,
+      from_challan,
+      challan_converted: !!(from_challan && challan_id)
+    });
+
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Booking Error:', err.message);
@@ -704,6 +725,136 @@ exports.deleteBooking = async (req, res) => {
     await client.query('ROLLBACK');
     console.error('Delete Booking Error:', err.message);
     res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+};
+
+exports.convertChallanToBill = async (req, res) => {
+  const client = await pool.connect();
+  const { id } = req.params;
+
+  try {
+    await client.query('BEGIN');
+
+    const ch = await client.query(
+      `SELECT * FROM delivery 
+       WHERE id = $1 AND converted_to_bill = FALSE 
+       FOR UPDATE`,
+      [id]
+    );
+
+    if (ch.rows.length === 0) {
+      throw new Error('Challan not found or already converted to bill');
+    }
+
+    const challan = ch.rows[0];
+    const items = Array.isArray(challan.items) ? challan.items : [];
+
+    if (items.length === 0) {
+      throw new Error('No items in challan');
+    }
+
+    // Generate BILL number
+    const bill_number = challan.challan_number.replace('DC-', 'BILL-');
+    const bill_date = new Date().toISOString().split('T')[0];
+
+    // Prepare items with serial no + amount
+    const itemsWithSerial = items.map((item, idx) => ({
+      s_no: idx + 1,
+      productname: item.productname || '',
+      brand: item.brand || '',
+      cases: Number(item.cases),
+      per_case: Number(item.per_case),
+      quantity: Number(item.cases) * Number(item.per_case),
+      rate_per_box: parseFloat(item.rate_per_box || 0),
+      discount_percent: 0,
+      amount: parseFloat((item.cases * item.per_case * (item.rate_per_box || 0)).toFixed(2)),
+      godown: item.godown || challan.from || 'SIVAKASI'
+    }));
+
+    const subtotal = itemsWithSerial.reduce((sum, i) => sum + i.amount, 0);
+    const totalCases = itemsWithSerial.reduce((sum, i) => sum + i.cases, 0);
+
+    // Generate PDF (using the SAME generatePDF function already in this file!)
+    const pdfFileName = `bill_${bill_number}.pdf`;
+    const pdfPath = path.join(__dirname, '..', 'public', 'uploads', 'pdfs', pdfFileName);
+    fs.mkdirSync(path.dirname(pdfPath), { recursive: true });
+
+    await generatePDF({
+      bill_number,
+      bill_date,
+      customer_name: challan.customer_name,
+      address: challan.address || '',
+      gstin: challan.gstin || '',
+      lr_number: challan.lr_number || '',
+      agent_name: 'DIRECT',
+      from: challan.from || 'SIVAKASI',
+      to: challan.to,
+      through: challan.through || '',
+      items: itemsWithSerial,
+      subtotal,
+      packingCharges: 0,
+      subtotalWithPacking: subtotal,
+      taxableUsed: subtotal,
+      addlDiscountAmt: 0,
+      cgstAmt: 0,
+      sgstAmt: 0,
+      igstAmt: 0,
+      roundOff: 0,
+      grandTotal: Math.round(subtotal),
+      totalCases,
+      stock_from: challan.from || 'SIVAKASI',
+      packing_percent: 0
+    }, pdfPath);
+
+    const relativePdfPath = `/uploads/pdfs/${pdfFileName}`;
+
+    // Insert into bookings
+    await client.query(
+      `INSERT INTO public.bookings (
+        bill_number, bill_date, customer_name, address, gstin, lr_number,
+        "from", "to", "through", items, pdf_path, from_challan, challan_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        bill_number,
+        bill_date,
+        challan.customer_name,
+        challan.address || '',
+        challan.gstin || '',
+        challan.lr_number || '',
+        challan.from || 'SIVAKASI',
+        challan.to,
+        challan.through || '',
+        JSON.stringify(itemsWithSerial),
+        relativePdfPath,
+        true,
+        challan.challan_number
+      ]
+    );
+
+    // Mark challan as converted
+    await client.query(
+      'UPDATE delivery SET converted_to_bill = TRUE WHERE id = $1',
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Challan successfully converted to Bill!',
+      bill_number,
+      pdfUrl: relativePdfPath
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Convert Challan → Bill Error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: err.message || 'Failed to convert challan' 
+    });
   } finally {
     client.release();
   }
