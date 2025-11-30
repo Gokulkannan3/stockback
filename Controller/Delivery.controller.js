@@ -1,13 +1,7 @@
 // Controller/Delivery.controller.js
 const { Pool } = require('pg');
 const pool = new Pool({ /* your config */ });
-
-const generateChallanNumber = async () => {
-  const res = await pool.query('SELECT COUNT(*) FROM delivery');
-  return `DC-${String(parseInt(res.rows[0].count) + 1).padStart(3, '0')}`;
-};
-
-// Controller/Delivery.controller.js
+const { getNextSequenceNumber } = require('../utils/sequence');
 
 exports.createDeliveryChallan = async (req, res) => {
   const client = await pool.connect();
@@ -20,7 +14,8 @@ exports.createDeliveryChallan = async (req, res) => {
     } = req.body;
 
     const user = req.body.created_by || 'Admin';
-    const challan_number = await generateChallanNumber();
+    const sequenceNumber = await getNextSequenceNumber();
+    const challan_number = `DC-${sequenceNumber}`;
 
     const itemsWithRate = [];
 
@@ -31,13 +26,10 @@ exports.createDeliveryChallan = async (req, res) => {
         throw new Error(`product_type is required for item with stock id ${id}`);
       }
 
-      // Build safe table name (public.schema is fixed)
-      const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
-
       // ---- 1. Fetch the current price (rate_per_box) from the dynamic table ----
       const priceQuery = `
-        SELECT price 
-        FROM public."${tableName}" 
+        SELECT per_case
+        FROM public.stock 
         WHERE id = $1
       `;
 
@@ -47,7 +39,7 @@ exports.createDeliveryChallan = async (req, res) => {
         throw new Error(`Item id ${id} not found in table public.${tableName}`);
       }
 
-      const rate_per_box = parseFloat(priceRes.rows[0].price) || 0;
+      const rate_per_box = per_case
 
       // ---- 2. Reduce stock (still using your central stock table) ----
       await client.query(
@@ -69,7 +61,7 @@ exports.createDeliveryChallan = async (req, res) => {
       // ---- 4. Keep the rate inside the item for the delivery record ----
       itemsWithRate.push({
         ...item,
-        rate_per_box   // this is what will be saved in delivery.items JSON
+        rate_per_box
       });
     }
 
