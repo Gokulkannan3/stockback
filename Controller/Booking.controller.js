@@ -256,7 +256,7 @@ const generatePDF = (data, outputPath) => {
     doc.pipe(stream);
 
     // === TITLE ===
-    doc.fontSize(16).font('Helvetica-Bold').text('Estimate', { align: 'center' }).moveDown(1.5);
+    doc.fontSize(16).font('Helvetica-Bold').text('ESTIMATE', { align: 'center' }).moveDown(1.5);
 
     const leftX = 50;
     const rightX = 350;
@@ -268,24 +268,41 @@ const generatePDF = (data, outputPath) => {
 
     // === CUSTOMER & BILL INFO ===
     const startY = 100;
-    doc.font('Helvetica-Bold').fontSize(10);
+    // Customer Information (left side - unchanged)
+    doc.font('Helvetica-Bold').fontSize(15);
     doc.text('Customer Information', leftX, startY);
-    doc.font('Helvetica').fontSize(10);
-    doc.text(`Party Name : ${data.customer_name || ''}`, leftX, startY + 15);
-    doc.text(`Address    : ${data.address || ''}`, leftX, startY + 30);
-    doc.text(`GSTIN      : ${data.gstin || ''}`, leftX, startY + 45);
 
-    doc.font('Helvetica-Bold').fontSize(10);
-    doc.text('Bill Details', rightX, startY);
-    doc.font('Helvetica').fontSize(10);
-    doc.text(`Bill NO     : ${data.bill_number}`, rightX, startY + 15);
-    doc.text(`Bill DATE   : ${formatDate(data.bill_date)}`, rightX, startY + 30);
-    doc.text(`Agent Name : ${data.agent_name || 'DIRECT'}`, rightX, startY + 45);
-    doc.text(`L.R. NUMBER : ${data.lr_number || ''}`, rightX, startY + 60);
-    doc.text(`No. of Cases : ${data.totalCases}`, rightX, startY + 75).fontSize(15);
+    doc.font('Helvetica').fontSize(12);
+    doc.text(`Party Name : ${data.customer_name || ''}`, leftX, startY + 17);
+    doc.text(`Address    : ${data.address || ''}`, leftX, startY + 32);
+    doc.text(`GSTIN      : ${data.gstin || ''}`, leftX, startY + 52);
+
+    // Bill Details (right side - RIGHT ALIGNED)
+    doc.font('Helvetica-Bold').fontSize(15);
+    doc.text('Bill Details', rightX, startY, { align: 'right' });
+
+    doc.font('Helvetica').fontSize(12);
+    doc.text(`Bill NO     : ${data.bill_number}`, rightX, startY + 17, { 
+        align: 'right'
+    });
+    doc.text(`Bill DATE   : ${formatDate(data.bill_date)}`, rightX, startY + 32, { 
+        align: 'right'
+    });
+    doc.text(`Agent Name : ${data.agent_name || 'DIRECT'}`, rightX, startY + 47, { 
+        align: 'right'
+    });
+    doc.text(`L.R. NUMBER : ${data.lr_number || ''}`, rightX, startY + 62, { 
+        align: 'right'
+    });
+
+    // Bold "No. of Cases" also right-aligned
+    doc.font('Helvetica-Bold').fontSize(15);
+    doc.text(`No. of Cases : ${data.totalCases}`, rightX, startY + 77, { 
+        align: 'right' 
+    });
 
     // === TABLE ===
-    let y = startY + 90;
+    let y = startY + 105;
     const headers = ['S.No', 'Product', 'Case', 'Per', 'Qty', 'Rate', 'Amount', 'From'];
     const verticalLines = [tableStartX];
     colWidths.forEach(w => verticalLines.push(verticalLines[verticalLines.length - 1] + w));
@@ -300,7 +317,7 @@ const generatePDF = (data, outputPath) => {
     verticalLines.forEach(vx => {
       doc.moveTo(vx, headerTop).lineTo(vx, headerBottom).stroke();
     });
-    doc.font('Helvetica-Bold').fontSize(9);
+    doc.font('Helvetica-Bold').fontSize(10);
     headers.forEach((h, i) => {
       doc.text(h, x + cellPadding, y + cellPadding, {
         width: colWidths[i] - 2 * cellPadding,
@@ -352,7 +369,7 @@ const generatePDF = (data, outputPath) => {
     // === TOTALS ===
     y += 15;
     const transportStartY = y;
-    doc.font('Helvetica-Bold').fontSize(10);
+    doc.font('Helvetica-Bold').fontSize(15);
     doc.text('Transport Details', leftX, transportStartY);
     doc.font('Helvetica').fontSize(10);
     doc.text(`From         : ${data.from}`, leftX, transportStartY + 15);
@@ -398,7 +415,7 @@ const generatePDF = (data, outputPath) => {
 
     // FOOTER
     const footerY = Math.max(y, ty) + 50;
-    doc.fontSize(8).font('Helvetica')
+    doc.fontSize(10).font('Helvetica')
        .text('Note:', leftX, footerY)
        .text('1. Company not responsible for transit loss/damage', leftX + 10, footerY + 12)
        .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, footerY + 24);
