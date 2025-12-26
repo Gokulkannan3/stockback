@@ -1,4 +1,22 @@
 {
+  "name": "b",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/Gokulkannan3/stockback#readme",
+  "bugs": {
+    "url": "https://github.com/Gokulkannan3/stockback/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gokulkannan3/stockback.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "nodemon server.js"
+  },
   "dependencies": {
     "axios": "^1.10.0",
     "bcryptjs": "^3.0.2",
@@ -14,14 +32,11 @@
     "jsdom": "^27.2.0",
     "multer": "^2.0.1",
     "multer-storage-cloudinary": "^4.0.0",
-    "nodemon": "^3.1.10",
+    "nodemon": "^3.1.11",
     "path": "^0.12.7",
     "pdfkit": "^0.17.1",
     "pdfmake": "^0.2.20",
     "pg": "^8.16.2",
     "pg-format": "^1.0.4"
-  },
-  "scripts": {
-    "start": "nodemon server.js"
   }
 }

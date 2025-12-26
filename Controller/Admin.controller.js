@@ -30,7 +30,7 @@ const loginUser = async (req, res) => {
     res.status(200).json({
       message: 'Login successful',
       username: user.username,
-      type: user.type,               // <-- crucial for frontend
+      type: user.type,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -38,7 +38,6 @@ const loginUser = async (req, res) => {
   }
 };
 
-// Register – admin creates users with type
 const registerUser = async (req, res) => {
   const { username, password, type } = req.body;
 

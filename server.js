@@ -31,6 +31,9 @@ app.use('/api', require('./Router/Booking.router'));
 app.use('/api', require('./Router/Wdispatch.router'));
 app.use('/api', require('./Router/Payments.router'));
 app.use('/api', require('./Router/Delivery.router'));
+app.use('/api', require('./Router/Company.router'));
+app.use('/api/binvent', require('./Router/Binvent.router'));
+app.use('/api/', require('./Router/Billing.router'));
 
 app.use((err, req, res, next) => {
   console.error('🔥 Error:', err.stack || err);
@@ -41,6 +44,6 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(5000, "0.0.0.0", () => {
+  console.log("Server running on port 5000");
 });
