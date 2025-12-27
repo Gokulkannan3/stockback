@@ -1,4 +1,3 @@
-// controllers/Booking.controller.js
 const { Pool } = require('pg');
 const pool = new Pool({
   user: process.env.PGUSER,
@@ -26,7 +25,6 @@ exports.getLatestBillNo = async (req, res) => {
 
     const cleanPrefix = prefix.trim().toUpperCase();
 
-    // Extract numeric part and find the MAX number used with this prefix
     const result = await pool.query(`
       SELECT bill_no
       FROM public.billings
@@ -35,8 +33,8 @@ exports.getLatestBillNo = async (req, res) => {
         (regexp_matches(bill_no, '^' || $2 || '-(\\d+)$'))[1]::INTEGER DESC
       LIMIT 1
     `, [
-      `^${cleanPrefix}-\\d+$`,           // Exact match: starts with prefix + dash + digits only
-      cleanPrefix                         // Safe for regex
+      `^${cleanPrefix}-\\d+$`,
+      cleanPrefix
     ]);
 
     let nextNumber = 1;
@@ -73,7 +71,7 @@ exports.checkBillNoExists = async (req, res) => {
   }
 };
 
-// NEW: Get recent customers (for autocomplete)
+// Get recent customers (for autocomplete)
 exports.getRecentCustomers = async (req, res) => {
   try {
     const result = await pool.query(`
@@ -95,7 +93,7 @@ exports.getRecentCustomers = async (req, res) => {
   }
 };
 
-// Updated createBooking to save PDF + proper bill_no
+// Updated createBooking - Now saves 'type' ('tax' or 'supply')
 exports.createBooking = async (req, res) => {
   const client = await pool.connect();
 
@@ -119,7 +117,8 @@ exports.createBooking = async (req, res) => {
       igst_amount = 0,
       net_amount = 0,
       bill_no: providedBillNo = '',
-      company_name: companyName = 'NISHA TRADERS'
+      company_name = 'NISHA TRADERS',
+      bill_type = 'tax'  // ← NEW: 'tax' or 'supply'
     } = req.body || {};
 
     if (!customer_name || !items) {
@@ -129,7 +128,7 @@ exports.createBooking = async (req, res) => {
     let finalBillNo = providedBillNo.trim().toUpperCase();
 
     if (!finalBillNo) {
-      const prefix = getCompanyInitials(companyName);
+      const prefix = getCompanyInitials(company_name);
       const latestRes = await client.query(`
         SELECT bill_no FROM billings 
         WHERE bill_no ILIKE $1 
@@ -163,14 +162,16 @@ exports.createBooking = async (req, res) => {
 
     const totalCases = itemsArray.reduce((sum, item) => sum + (parseInt(item.cases) || 0), 0);
 
-    // INSERT WITHOUT pdf_data
     const insertQuery = `
       INSERT INTO public.billings (
         bill_no, customer_name, customer_address, customer_gstin, customer_place,
         customer_state_code, through, destination, no_of_cases, subtotal, packing_amount,
-        extra_amount, cgst_amount, sgst_amount, igst_amount, net_amount, items, company_name, created_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
-      RETURNING id, bill_no, created_at
+        extra_amount, cgst_amount, sgst_amount, igst_amount, net_amount, items, company_name,
+        type, created_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW()
+      )
+      RETURNING id, bill_no, created_at, type
     `;
 
     const values = [
@@ -178,7 +179,8 @@ exports.createBooking = async (req, res) => {
       customer_state_code, through, destination || '', totalCases,
       parseFloat(subtotal), parseFloat(packing_amount), parseFloat(extra_amount),
       parseFloat(cgst_amount), parseFloat(sgst_amount), parseFloat(igst_amount),
-      parseFloat(net_amount), JSON.stringify(itemsArray), companyName  // ← Added
+      parseFloat(net_amount), JSON.stringify(itemsArray), company_name,
+      bill_type.trim().toLowerCase()  // ← Save 'tax' or 'supply'
     ];
 
     const result = await client.query(insertQuery, values);
@@ -198,14 +200,15 @@ exports.createBooking = async (req, res) => {
   }
 };
 
-// GET ALL BOOKINGS
+// GET ALL BOOKINGS - Now includes 'type'
 exports.getAllBookings = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, bill_no, customer_name, customer_address, customer_gstin, 
-             customer_place, customer_state_code, through, destination, no_of_cases,
-             subtotal, packing_amount, extra_amount, cgst_amount, sgst_amount,
-             igst_amount, net_amount, items, created_at
+      SELECT 
+        id, bill_no, customer_name, customer_address, customer_gstin, 
+        customer_place, customer_state_code, through, destination, no_of_cases,
+        subtotal, packing_amount, extra_amount, cgst_amount, sgst_amount,
+        igst_amount, net_amount, items, company_name, type, created_at
       FROM public.billings
       ORDER BY created_at DESC
     `);
@@ -216,7 +219,7 @@ exports.getAllBookings = async (req, res) => {
   }
 };
 
-// GET SINGLE BILL (for printing)
+// GET SINGLE BILL
 exports.getBookingById = async (req, res) => {
   try {
     const { id } = req.params;
