@@ -1,7 +1,7 @@
 // routes/booking.js
 const express = require('express');
 const router = express.Router();
-const { createBooking, getBookings, getCustomers, searchProductsGlobal,editBooking,deleteBooking,convertChallanToBill } = require('../Controller/Booking.controller');
+const { createBooking, getBookings, getCustomers, searchProductsGlobal,editBooking,deleteBooking,convertChallanToBill,getBookingPDF } = require('../Controller/Booking.controller');
 const godownController = require('../Controller/Godown.controller');
 
 router.post('/godown', godownController.addGodown);
@@ -17,5 +17,6 @@ router.get('/search/global', searchProductsGlobal);
 router.patch('/booking/:id', editBooking);
 router.delete('/booking/:id', deleteBooking);
 router.post('/challan/:id/convert', convertChallanToBill);
+router.get('/booking/pdf/:id', getBookingPDF);
 
 module.exports = router;
